@@ -1,6 +1,6 @@
 SET EXPLAIN_FORMAT=tree;
 CREATE TABLE t1 (f1 INT, f2 INT, f3 CHAR(1), f4 CHAR(1), f5 CHAR(1), f6 CHAR(1), f7 CHAR(1),
-PRIMARY KEY (f5, f1), KEY (f2), KEY (f3), KEY (f4), KEY(f7) );
+PRIMARY KEY (f5, f1), KEY (f2), KEY (f3), KEY (f4), KEY(f7), KEY idx(f3, f4) INVISIBLE);
 INSERT INTO t1 VALUES (1, 1, 'a', 'h', 'i', '', ''), (2, 3, 'a', 'h', 'i', '', ''),
 (3, 2, 'b', '', 'j', '', ''), (4, 2, 'b', '', 'j', '', '');
 INSERT INTO t1 VALUES (5, 1, 'a', 'h', 'i', '', ''), (6, 3, 'a', 'h', 'i', '', ''),
@@ -96,14 +96,14 @@ Warning	3126	Hint NO_INDEX_MERGE(`t1` ) is ignored as conflicting/duplicated
 EXPLAIN SELECT /*+ NO_INDEX_MERGE(t1) INDEX_MERGE(t1 f2, f3, f4) */ f2 FROM t1 WHERE f4 = 'h' AND f2 = 2 AND f3 = 'b';
 EXPLAIN
 -> Filter: ((t1.f3 = 'b') and (t1.f4 = 'h'))  (rows=25.3)
-    -> Index lookup on t1 using f2 (f2=2)  (rows=128)
+    -> Index lookup on t1 using f2 (f2 = 2)  (rows=128)
 
 Warnings:
 Warning	3126	Hint INDEX_MERGE(`t1`  `f2`, `f3`, `f4`) is ignored as conflicting/duplicated
 EXPLAIN SELECT /*+ NO_INDEX_MERGE(t1 f2, f4) INDEX_MERGE(t1 f2, f3, f4) */ f2 FROM t1 WHERE f4 = 'h' AND f2 = 2 AND f3 = 'b';
 EXPLAIN
 -> Filter: ((t1.f3 = 'b') and (t1.f4 = 'h'))  (rows=25.3)
-    -> Index lookup on t1 using f2 (f2=2)  (rows=128)
+    -> Index lookup on t1 using f2 (f2 = 2)  (rows=128)
 
 Warnings:
 Warning	3126	Hint INDEX_MERGE(`t1`  `f2`, `f3`, `f4`) is ignored as conflicting/duplicated
@@ -226,6 +226,7 @@ EXPLAIN
     -> Filter: ((t1.f3 = 'c') and (t1.f2 = 3) and (t1.f5 > ''))  (rows=0.167)
         -> Intersect rows sorted by row ID  (rows=1)
             -> Index range scan on t1 using f3 over (f3 = 'c' AND '' < f5)  (rows=1)
+            -> Index range scan on t1 using PRIMARY over ('' < f5)  (rows=256)
 
 EXPLAIN SELECT /*+ INDEX_MERGE(t1 f2, PRIMARY) */ count(*) FROM t1 WHERE f2 = 3 AND f5 > '' AND f3 = 'c';
 EXPLAIN
@@ -233,11 +234,12 @@ EXPLAIN
     -> Filter: ((t1.f3 = 'c') and (t1.f2 = 3) and (t1.f5 > ''))  (rows=14)
         -> Intersect rows sorted by row ID  (rows=56.9)
             -> Index range scan on t1 using f2 over (f2 = 3 AND '' < f5)  (rows=64)
+            -> Index range scan on t1 using PRIMARY over ('' < f5)  (rows=256)
 
 EXPLAIN SELECT /*+ INDEX_MERGE(t1 f2, f4, f5) */ f3 FROM t1 WHERE f4 = 'h' AND f2 = 2 AND f3 = 'b';
 EXPLAIN
 -> Filter: ((t1.f3 = 'b') and (t1.f4 = 'h'))  (rows=25.3)
-    -> Index lookup on t1 using f2 (f2=2)  (rows=128)
+    -> Index lookup on t1 using f2 (f2 = 2)  (rows=128)
 
 Warnings:
 Warning	3128	Unresolved name `t1`@`select#1` `f5` for INDEX_MERGE hint
@@ -289,7 +291,7 @@ EXPLAIN SELECT COUNT(*) FROM t1 WHERE f4 = 'h' AND f2 = 2 AND f3 = 'b';
 EXPLAIN
 -> Aggregate: count(0)  (rows=1)
     -> Filter: ((t1.f3 = 'b') and (t1.f4 = 'h'))  (rows=25.3)
-        -> Index lookup on t1 using f2 (f2=2)  (rows=128)
+        -> Index lookup on t1 using f2 (f2 = 2)  (rows=128)
 
 EXPLAIN SELECT /*+ INDEX_MERGE(t1 f2, f3, f4) */ COUNT(*) FROM t1 WHERE f4 = 'h' AND f2 = 2 AND f3 = 'b';
 EXPLAIN
@@ -306,13 +308,13 @@ EXPLAIN SELECT /*+ NO_INDEX_MERGE(t1 f4) */ COUNT(*) FROM t1 WHERE f4 = 'h' AND 
 EXPLAIN
 -> Aggregate: count(0)  (rows=1)
     -> Filter: (t1.f4 = 'h')  (rows=56.9)
-        -> Index lookup on t1 using f2 (f2=2)  (rows=128)
+        -> Index lookup on t1 using f2 (f2 = 2)  (rows=128)
 
 EXPLAIN SELECT /*+ NO_INDEX_MERGE(t1) */ COUNT(*) FROM t1 WHERE f4 = 'h' AND f2 = 2 AND f3 = 'b';
 EXPLAIN
 -> Aggregate: count(0)  (rows=1)
     -> Filter: ((t1.f3 = 'b') and (t1.f4 = 'h'))  (rows=25.3)
-        -> Index lookup on t1 using f2 (f2=2)  (rows=128)
+        -> Index lookup on t1 using f2 (f2 = 2)  (rows=128)
 
 EXPLAIN SELECT /*+ NO_INDEX_MERGE(t1 f3) */ COUNT(*) FROM t1 WHERE f4 = 'h' AND f2 = 2;
 EXPLAIN
@@ -326,7 +328,7 @@ EXPLAIN SELECT /*+ NO_INDEX_MERGE(t1 f4) */ COUNT(*) FROM t1 WHERE f4 = 'h' AND 
 EXPLAIN
 -> Aggregate: count(0)  (rows=1)
     -> Filter: ((t1.f3 = 'b') and (t1.f4 = 'h'))  (rows=25.3)
-        -> Index lookup on t1 using f2 (f2=2)  (rows=128)
+        -> Index lookup on t1 using f2 (f2 = 2)  (rows=128)
 
 EXPLAIN SELECT count(*) FROM t1 WHERE f2 = 3 AND f5 > '' AND f3 = 'c';
 EXPLAIN
@@ -334,6 +336,7 @@ EXPLAIN
     -> Filter: ((t1.f3 = 'c') and (t1.f2 = 3) and (t1.f5 > ''))  (rows=0.167)
         -> Intersect rows sorted by row ID  (rows=1)
             -> Index range scan on t1 using f3 over (f3 = 'c' AND '' < f5)  (rows=1)
+            -> Index range scan on t1 using PRIMARY over ('' < f5)  (rows=256)
 
 EXPLAIN SELECT /*+ NO_INDEX_MERGE(t1 PRIMARY) */ count(*) FROM t1 WHERE f2 = 3 AND f5 > '' AND f3 = 'c';
 EXPLAIN
@@ -347,6 +350,7 @@ EXPLAIN
     -> Filter: ((t1.f3 = 'c') and (t1.f2 = 3) and (t1.f5 > ''))  (rows=0.167)
         -> Intersect rows sorted by row ID  (rows=1)
             -> Index range scan on t1 using f3 over (f3 = 'c' AND '' < f5)  (rows=1)
+            -> Index range scan on t1 using PRIMARY over ('' < f5)  (rows=256)
 
 EXPLAIN SELECT /*+ NO_INDEX_MERGE(t1 f3) */ count(*) FROM t1 WHERE f2 = 3 AND f5 > '' AND f3 = 'c';
 EXPLAIN
@@ -358,7 +362,7 @@ EXPLAIN SELECT COUNT(*) FROM t1 WHERE f4 = 'x' AND f2 = 5 AND f3 = 'n';
 EXPLAIN
 -> Aggregate: count(0)  (rows=1)
     -> Filter: ((t1.f2 = 5) and (t1.f4 = 'x'))  (rows=0.05)
-        -> Index lookup on t1 using f3 (f3='n'), with index condition: (t1.f3 = 'n')  (rows=1)
+        -> Index lookup on t1 using f3 (f3 = 'n'), with index condition: (t1.f3 = 'n')  (rows=1)
 
 EXPLAIN SELECT /*+ INDEX_MERGE(t1) */ COUNT(*) FROM t1 WHERE f4 = 'x' AND f2 = 5 AND f3 = 'n';
 EXPLAIN
@@ -396,7 +400,7 @@ EXPLAIN SELECT /*+ INDEX_MERGE(t1 f2, f4) */ COUNT(*) FROM t1 WHERE f4 = 'h' AND
 EXPLAIN
 -> Aggregate: count(0)  (rows=1)
     -> Filter: (t1.f2 > 2)  (rows=42.7)
-        -> Index lookup on t1 using f4 (f4='h'), with index condition: (t1.f4 = 'h')  (rows=128)
+        -> Index lookup on t1 using f4 (f4 = 'h'), with index condition: (t1.f4 = 'h')  (rows=128)
 
 SET optimizer_switch='index_merge_union=off,index_merge=off';
 EXPLAIN SELECT /*+ INDEX_MERGE(t1 f2, f3, f4) */ f1 FROM t1 WHERE f2 = 5 OR f3 = 'c' OR f4 = 'f';
@@ -447,7 +451,7 @@ EXPLAIN
 EXPLAIN SELECT * FROM t1 WHERE f2 = 400 AND (f3 = 'x' OR f4 = 'n');
 EXPLAIN
 -> Filter: ((t1.f3 = 'x') or (t1.f4 = 'n'))  (rows=0.438)
-    -> Index lookup on t1 using f2 (f2=400)  (rows=1)
+    -> Index lookup on t1 using f2 (f2 = 400)  (rows=1)
 
 EXPLAIN SELECT /*+ INDEX_MERGE(t1 f3, f4) */ * FROM t1 WHERE f2 = 400 AND (f3 = 'x' OR f4 = 'n');
 EXPLAIN
@@ -587,12 +591,14 @@ EXPLAIN
 -> Filter: ((t1.f2 = 3) and (t1.f4 = 'f') and (t1.f5 > ''))  (rows=0.167)
     -> Intersect rows sorted by row ID  (rows=1)
         -> Index range scan on t1 using f4 over (f4 = 'f' AND '' < f5)  (rows=1)
+        -> Index range scan on t1 using PRIMARY over ('' < f5)  (rows=256)
 
 EXPLAIN SELECT /*+ INDEX_MERGE(t1) */ f3 FROM t1 WHERE f4 = 'f' AND f2 = 3 AND f5 > '';
 EXPLAIN
 -> Filter: ((t1.f2 = 3) and (t1.f4 = 'f') and (t1.f5 > ''))  (rows=0.167)
     -> Intersect rows sorted by row ID  (rows=1)
         -> Index range scan on t1 using f4 over (f4 = 'f' AND '' < f5)  (rows=1)
+        -> Index range scan on t1 using PRIMARY over ('' < f5)  (rows=256)
 
 EXPLAIN SELECT f3 FROM t1 WHERE f2 = 3 AND f4 = 'g' AND f5 = '';
 EXPLAIN
@@ -618,6 +624,7 @@ EXPLAIN
 -> Filter: ((t1.f4 = '') and (t1.f2 = 3) and (t1.f5 > ''))  (rows=14)
     -> Intersect rows sorted by row ID  (rows=56.9)
         -> Index range scan on t1 using f2 over (f2 = 3 AND '' < f5)  (rows=64)
+        -> Index range scan on t1 using PRIMARY over ('' < f5)  (rows=256)
 
 EXPLAIN SELECT f3 FROM t1 WHERE (f2 = 3 AND f4 = '' AND f5 > '') OR (f7 = 'd' AND f6 = 'e');
 EXPLAIN
@@ -639,6 +646,7 @@ EXPLAIN
     -> Deduplicate rows sorted by row ID  (rows=57)
         -> Intersect rows sorted by row ID  (rows=56.9)
             -> Index range scan on t1 using f2 over (f2 = 3 AND '' < f5)  (rows=64)
+            -> Index range scan on t1 using PRIMARY over ('' < f5)  (rows=256)
         -> Index range scan on t1 using f7 over (f7 = 'd')  (rows=1)
 
 EXPLAIN SELECT /*+ INDEX_MERGE(t1) */ f2 FROM t1 WHERE f2 = 2 AND f4 = 'g' AND f5 = '';
@@ -651,7 +659,7 @@ EXPLAIN
 EXPLAIN SELECT /*+ INDEX_MERGE(t1 f3, f4) */ * FROM t1 IGNORE INDEX (f3) WHERE f2 = 400 AND (f3 = 'x' OR f4 = 'n');
 EXPLAIN
 -> Filter: ((t1.f3 = 'x') or (t1.f4 = 'n'))  (rows=0.438)
-    -> Index lookup on t1 using f2 (f2=400)  (rows=1)
+    -> Index lookup on t1 using f2 (f2 = 400)  (rows=1)
 
 EXPLAIN SELECT /*+ INDEX_MERGE(t1 f3, f4) */ * FROM t1 FORCE INDEX (f3) WHERE f2 = 400 AND (f3 = 'x' OR f4 = 'n');
 EXPLAIN
@@ -673,7 +681,7 @@ EXPLAIN
 EXPLAIN SELECT /*+ INDEX_MERGE(t1 f2, f3, f4) */ f2 FROM t1 IGNORE INDEX (f2, f3) WHERE f4 = 'h' AND f2 = 2 AND f3 = 'b';
 EXPLAIN
 -> Filter: ((t1.f3 = 'b') and (t1.f2 = 2))  (rows=5.33)
-    -> Index lookup on t1 using f4 (f4='h'), with index condition: (t1.f4 = 'h')  (rows=128)
+    -> Index lookup on t1 using f4 (f4 = 'h'), with index condition: (t1.f4 = 'h')  (rows=128)
 
 EXPLAIN SELECT /*+ INDEX_MERGE(t1 f2, f3, f4) */ f2 FROM t1 FORCE INDEX (f2, f3) WHERE f4 = 'h' AND f2 = 2 AND f3 = 'b';
 EXPLAIN
@@ -689,12 +697,12 @@ EXPLAIN
         -> Index range scan on t1 using f2 over (f2 = 2)  (rows=128)
         -> Index range scan on t1 using f3 over (f3 = 'b')  (rows=128)
 
-ALTER TABLE t1 ADD KEY idx(f3, f4);
+ALTER TABLE t1 ALTER INDEX idx VISIBLE;
 # Original query
 EXPLAIN SELECT f2 FROM t1 WHERE f2 = 2 AND f3 = 'b' AND f4 = 'h';
 EXPLAIN
 -> Filter: (t1.f2 = 2)  (rows=0.444)
-    -> Index lookup on t1 using idx (f3='b', f4='h'), with index condition: ((t1.f4 = 'h') and (t1.f3 = 'b'))  (rows=1)
+    -> Index lookup on t1 using idx (f3 = 'b', f4 = 'h'), with index condition: ((t1.f4 = 'h') and (t1.f3 = 'b'))  (rows=1)
 
 # Index merge intersection(f2, f3, f4) should be used.
 EXPLAIN SELECT /*+ INDEX_MERGE(t1 f2, f3, f4) */ f2 FROM t1 WHERE f2 = 2 AND f3 = 'b' AND f4 = 'h';

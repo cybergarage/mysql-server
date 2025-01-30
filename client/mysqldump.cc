@@ -297,7 +297,7 @@ static struct my_option my_long_options[] = {
     {"column-statistics", 0,
      "Add an ANALYZE TABLE statement to regenerate any existing column "
      "statistics.",
-     &column_statistics, &column_statistics, nullptr, GET_BOOL, NO_ARG, 1, 0, 0,
+     &column_statistics, &column_statistics, nullptr, GET_BOOL, NO_ARG, 0, 0, 0,
      nullptr, 0, nullptr},
     {"comments", 'i', "Write additional information.", &opt_comments,
      &opt_comments, nullptr, GET_BOOL, NO_ARG, 1, 0, 0, nullptr, 0, nullptr},
@@ -1082,8 +1082,8 @@ static bool get_one_option(int optid, const struct my_option *opt,
       break;
     case (int)OPT_COMPACT:
       if (opt_compact) {
-        opt_comments = opt_drop = opt_disable_keys = opt_lock = false;
-        opt_set_charset = false;
+        opt_comments = opt_drop = opt_disable_keys = opt_lock = opt_tz_utc =
+            opt_set_charset = false;
       }
       break;
     case (int)OPT_TABLES:
@@ -2381,6 +2381,78 @@ static char *create_delimiter(char *query, char *delimiter_buff,
 }
 
 /*
+ * fprintf_string:
+ * -- Print the escaped version of the given char* row into the md_result_file.
+ *
+ * @param[in] row                 the row to be printed
+ * @param[in] row_len             length of the row
+ * @param[in] quote               quote character, like ' or ` etc.
+ * @param[in] needs_newline       whether to print newline after the row
+ *
+ * @retval void
+ *
+ */
+static void fprintf_string(char *row, ulong row_len, char quote,
+                           bool needs_newline) {
+  // Create the buffer where we'll have sanitized row.
+  char buffer[2048];
+  char *pbuffer;
+  pbuffer = &buffer[0];
+
+  uint64_t curr_row_size = (static_cast<uint64_t>(row_len) * 2) + 1;
+
+  // We'll allocate dynamic memory only for huge rows
+  if (curr_row_size > sizeof(buffer))
+    pbuffer = (char *)my_malloc(PSI_NOT_INSTRUMENTED, curr_row_size, MYF(0));
+
+  // Put the sanitized row in the buffer.
+  mysql_real_escape_string_quote(mysql, pbuffer, row, row_len, '\'');
+
+  // Opening quote
+  fputc(quote, md_result_file);
+
+  // Print the row to the file.
+  fputs(pbuffer, md_result_file);
+
+  // Closing quote
+  fputc(quote, md_result_file);
+
+  // Add the new line
+  if (needs_newline) fputc('\n', md_result_file);
+
+  // Free the buffer if we have to.
+  if (pbuffer != &buffer[0]) my_free(pbuffer);
+}
+
+/*
+ * is_string_integer:
+ * Check if the given string is a valid integer or not.
+ *
+ * @param[in]  str       number to be checked
+ * @param[in]  str_len   length of the string
+ *
+ * @retval     true      if the string represents an integer
+ * @retval     false     if the string has non-digit characters
+ */
+static bool is_string_integer(const char *str, ulong str_len) {
+  // Empty strings are invalid numbers
+  if (str_len == 0) return false;
+
+  ulong start_index = 0;
+
+  // For negative integers, start the index with 1
+  if (str[0] == '-') {
+    if (str_len == 1) return false;
+    start_index = 1;
+  }
+
+  for (ulong i = start_index; i < str_len; i++)
+    if (!std::isdigit(str[i])) return false;
+
+  return true;
+}
+
+/*
   dump_events_for_db
   -- retrieves list of events for a given db, and prints out
   the CREATE EVENT statement into the output (the dump).
@@ -2578,11 +2650,13 @@ static uint dump_routines_for_db(char *db) {
   char query_buff[QUERY_LENGTH];
   const char *routine_type[] = {"FUNCTION", "PROCEDURE"};
   char db_name_buff[NAME_LEN * 2 + 3], name_buff[NAME_LEN * 2 + 3];
+  char escaped_name[NAME_LEN * 2 + 3];
+  char lib_schema_buff[NAME_LEN * 2 + 3], lib_name_buff[NAME_LEN * 2 + 3];
   char *routine_name;
   int i;
   FILE *sql_file = md_result_file;
-  MYSQL_RES *routine_res, *routine_list_res;
-  MYSQL_ROW row, routine_list_row;
+  MYSQL_RES *routine_res, *routine_list_res, *import_res, *imported_library_res;
+  MYSQL_ROW row, routine_list_row, import_list_row;
 
   char db_cl_name[MY_CS_NAME_SIZE];
   int db_cl_altered = false;
@@ -2617,6 +2691,77 @@ static uint dump_routines_for_db(char *db) {
 
   if (opt_xml) fputs("\t<routines>\n", sql_file);
 
+  {
+    /* First dump the libraries. They may be used by the routines. */
+    std::string query{
+        std::string{
+            "SELECT LIBRARY_NAME FROM INFORMATION_SCHEMA.LIBRARIES WHERE "
+            "LIBRARY_SCHEMA = '"} +
+        db_name_buff + "' ORDER BY LIBRARY_NAME"};
+
+    if (mysql_query_with_error_report(mysql, &routine_list_res, query.c_str()))
+      return 1;
+
+    if (mysql_num_rows(routine_list_res)) {
+      while ((routine_list_row = mysql_fetch_row(routine_list_res))) {
+        routine_name = quote_name(routine_list_row[0], name_buff, false);
+        DBUG_PRINT("info", ("retrieving CREATE LIBRARY for %s", name_buff));
+        std::string show_create_query{std::string{"SHOW CREATE LIBRARY "} +
+                                      routine_name};
+        if (mysql_query_with_error_report(mysql, &routine_res,
+                                          show_create_query.c_str()))
+          return 1;
+
+        while ((row = mysql_fetch_row(routine_res))) {
+          /*
+            if the user has EXECUTE privilege he see library names, but NOT the
+            library body of other routines that are not the creator of!
+          */
+          DBUG_PRINT("info",
+                     ("length of body for %s row[2] '%s' is %zu", routine_name,
+                      row[2] ? row[2] : "(null)", row[2] ? strlen(row[2]) : 0));
+          if (row[2] == nullptr) {
+            print_comment(sql_file, true,
+                          "\n-- insufficient privileges to %s\n", query_buff);
+
+            bool freemem = false;
+            char const *text =
+                fix_identifier_with_newline(current_user, &freemem);
+            print_comment(sql_file, true,
+                          "-- does %s have permissions on "
+                          "INFORMATION_SCHEMA.LIBRARIES?\n\n",
+                          text);
+            if (freemem) my_free(const_cast<char *>(text));
+
+            maybe_die(EX_MYSQLERR, "%s has insufficient privileges to %s!",
+                      current_user, query_buff);
+          } else if (strlen(row[2])) {
+            if (opt_xml) {
+              print_xml_row(sql_file, "library", routine_res, &row,
+                            "Create Library");
+              continue;
+            }
+            if (opt_drop)
+              fprintf(sql_file, "DROP LIBRARY IF EXISTS %s;\n", routine_name);
+
+            switch_sql_mode(sql_file, ";", row[1]);
+
+            fprintf(sql_file,
+                    "DELIMITER ;;\n"
+                    "%s ;;\n"
+                    "DELIMITER ;\n",
+                    (const char *)row[2]);
+
+            restore_sql_mode(sql_file, ";");
+          }
+        } /* end of library printing */
+        mysql_free_result(routine_res);
+
+      } /* end of list of libraries */
+    }
+    mysql_free_result(routine_list_res);
+  }
+
   /* 0, retrieve and dump functions, 1, procedures */
   for (i = 0; i <= 1; i++) {
     snprintf(query_buff, sizeof(query_buff), "SHOW %s STATUS WHERE Db = '%s'",
@@ -2628,6 +2773,64 @@ static uint dump_routines_for_db(char *db) {
     if (mysql_num_rows(routine_list_res)) {
       while ((routine_list_row = mysql_fetch_row(routine_list_res))) {
         routine_name = quote_name(routine_list_row[1], name_buff, false);
+
+        /**
+         * TODO: this is a temporary fix until Bug#37375233 is properly
+         * resolved. For each SP, check if libraries in "USING" clause actually
+         * exist. If not, exit with error because such dump would not be
+         * restorable. However, with proper fix, simply treat warnings from SHOW
+         * CREATE SP as errors here.
+         */
+        mysql_real_escape_string_quote(mysql, escaped_name, routine_list_row[1],
+                                       (ulong)strlen(routine_list_row[1]),
+                                       '\'');
+
+        // 1st step: get all imports for the SP
+        snprintf(query_buff, sizeof(query_buff),
+                 "SELECT LIBRARY_SCHEMA, LIBRARY_NAME FROM "
+                 "INFORMATION_SCHEMA.ROUTINE_LIBRARIES WHERE "
+                 "ROUTINE_SCHEMA = '%s' AND ROUTINE_NAME = '%s' AND "
+                 "ROUTINE_TYPE = '%s'",
+                 db_name_buff, escaped_name, routine_type[i]);
+        if (mysql_query_with_error_report(mysql, &import_res, query_buff))
+          return 1;
+
+        // 2nd step: iterate these imports and query I_S.LIBRARIES to check if
+        // they exist and if the current user has access to them
+        if (mysql_num_rows(import_res)) {
+          while ((import_list_row = mysql_fetch_row(import_res))) {
+            mysql_real_escape_string_quote(
+                mysql, lib_schema_buff, import_list_row[0],
+                (ulong)strlen(import_list_row[0]), '\'');
+            mysql_real_escape_string_quote(
+                mysql, lib_name_buff, import_list_row[1],
+                (ulong)strlen(import_list_row[1]), '\'');
+
+            snprintf(query_buff, sizeof(query_buff),
+                     "SELECT * FROM "
+                     "INFORMATION_SCHEMA.LIBRARIES WHERE "
+                     "LIBRARY_SCHEMA = '%s' AND LIBRARY_NAME = '%s'",
+                     lib_schema_buff, lib_name_buff);
+
+            if (mysql_query_with_error_report(mysql, &imported_library_res,
+                                              query_buff))
+              return 1;
+
+            if (mysql_num_rows(imported_library_res) == 0) {
+              // imported library does NOT exist
+              print_comment(
+                  sql_file, true,
+                  "\n-- Library used by %s does not exist: '%s'.'%s'\n",
+                  escaped_name, lib_schema_buff, lib_name_buff);
+              maybe_die(EX_MYSQLERR, "Missing library: %s.%s", lib_schema_buff,
+                        lib_name_buff);
+            }
+            mysql_free_result(imported_library_res);
+          }
+        }
+        mysql_free_result(import_res);
+        // End of temp code until Bug#37375233 is done.
+
         DBUG_PRINT("info",
                    ("retrieving CREATE %s for %s", routine_type[i], name_buff));
         snprintf(query_buff, sizeof(query_buff), "SHOW CREATE %s %s",
@@ -4017,6 +4220,7 @@ static void dump_table(char *table, char *db) {
       DB_error(mysql, "when retrieving data from server");
       goto err;
     }
+    auto res_guard = create_scope_guard([&] { mysql_free_result(res); });
 
     verbose_msg("-- Retrieving rows...\n");
     if (mysql_num_fields(res) != num_fields) {
@@ -4279,7 +4483,7 @@ static void dump_table(char *table, char *db) {
       fprintf(md_result_file, "commit;\n");
       check_io(md_result_file);
     }
-    mysql_free_result(res);
+    res_guard.reset();
   }
   dynstr_free(&query_string);
   if (extended_insert) dynstr_free(&extended_row);
@@ -4390,6 +4594,7 @@ static int dump_tablespaces(char *ts_where) {
   MYSQL_RES *tableres;
   char buf[FN_REFLEN];
   DYNAMIC_STRING sqlbuf;
+  ulong *lengths;
   int first = 0;
   /*
     The following are used for parsing the EXTRA field
@@ -4447,31 +4652,42 @@ static int dump_tablespaces(char *ts_where) {
 
   buf[0] = 0;
   while ((row = mysql_fetch_row(tableres))) {
+    lengths = mysql_fetch_lengths(tableres);
     if (strcmp(buf, row[0]) != 0) first = 1;
     if (first) {
+      /*
+       * The print_comment below prints single line comments in the
+       * md_result_file (--). The single line comment is terminated by a new
+       * line, however because of the usage of mysql_real_escape_string_quote,
+       * the new line character will get escaped too in the string, hence
+       * another new line characters are being used at the end of the string
+       * to terminate the single line comment.
+       */
+      mysql_real_escape_string_quote(mysql, buf, row[0], lengths[0], '\'');
       print_comment(md_result_file, false, "\n--\n-- Logfile group: %s\n--\n",
-                    row[0]);
-
+                    buf);
+      buf[0] = 0;
       fprintf(md_result_file, "\nCREATE");
     } else {
       fprintf(md_result_file, "\nALTER");
     }
-    fprintf(md_result_file,
-            " LOGFILE GROUP %s\n"
-            "  ADD UNDOFILE '%s'\n",
-            row[0], row[1]);
+    fprintf(md_result_file, " LOGFILE GROUP ");
+    fprintf_string(row[0], lengths[0], '`', true);
+    fprintf(md_result_file, "  ADD UNDOFILE ");
+    fprintf_string(row[1], lengths[1], '\'', true);
     if (first) {
       ubs = strstr(row[5], extra_format);
       if (!ubs) break;
       ubs += strlen(extra_format);
       endsemi = strstr(ubs, ";");
       if (endsemi) endsemi[0] = '\0';
+      if (!is_string_integer(ubs, (ulong)strlen(ubs))) return 1;
       fprintf(md_result_file, "  UNDO_BUFFER_SIZE %s\n", ubs);
     }
-    fprintf(md_result_file,
-            "  INITIAL_SIZE %s\n"
-            "  ENGINE=%s;\n",
-            row[3], row[4]);
+    if (!is_string_integer(row[3], lengths[3])) return 1;
+    fprintf(md_result_file, "  INITIAL_SIZE %s\n  ENGINE=", row[3]);
+    fprintf_string(row[4], lengths[4], '`', false);
+    fprintf(md_result_file, ";\n");
     check_io(md_result_file);
     if (first) {
       first = 0;
@@ -4501,30 +4717,50 @@ static int dump_tablespaces(char *ts_where) {
     return 1;
   }
 
+  DBUG_EXECUTE_IF("tablespace_injection_test", {
+    mysql_free_result(tableres);
+    mysql_query_with_error_report(
+        mysql, &tableres,
+        "SELECT 'TN; /*' AS TABLESPACE_NAME, 'FN' AS FILE_NAME, 'LGN' AS "
+        "LOGFILE_GROUP_NAME, 77 AS EXTENT_SIZE, 88 AS INITIAL_SIZE, "
+        "'*/\nsystem touch foo;\n' AS ENGINE");
+  });
+
   buf[0] = 0;
   while ((row = mysql_fetch_row(tableres))) {
+    lengths = mysql_fetch_lengths(tableres);
     if (strcmp(buf, row[0]) != 0) first = 1;
     if (first) {
+      /*
+       * The print_comment below prints single line comments in the
+       * md_result_file (--). The single line comment is terminated by a new
+       * line, however because of the usage of mysql_real_escape_string_quote,
+       * the new line character will get escaped too in the string, hence
+       * another new line characters are being used at the end of the string
+       * to terminate the single line comment.
+       */
+      mysql_real_escape_string_quote(mysql, buf, row[0], lengths[0], '\'');
       print_comment(md_result_file, false, "\n--\n-- Tablespace: %s\n--\n",
-                    row[0]);
+                    buf);
+      buf[0] = 0;
       fprintf(md_result_file, "\nCREATE");
     } else {
       fprintf(md_result_file, "\nALTER");
     }
-    fprintf(md_result_file,
-            " TABLESPACE %s\n"
-            "  ADD DATAFILE '%s'\n",
-            row[0], row[1]);
+    fprintf(md_result_file, " TABLESPACE ");
+    fprintf_string(row[0], lengths[0], '`', true);
+    fprintf(md_result_file, "  ADD DATAFILE ");
+    fprintf_string(row[1], lengths[1], '\'', true);
     if (first) {
-      fprintf(md_result_file,
-              "  USE LOGFILE GROUP %s\n"
-              "  EXTENT_SIZE %s\n",
-              row[2], row[3]);
+      fprintf(md_result_file, "  USE LOGFILE GROUP ");
+      fprintf_string(row[2], lengths[2], '`', true);
+      if (!is_string_integer(row[3], lengths[3])) return 1;
+      fprintf(md_result_file, "  EXTENT_SIZE %s\n", row[3]);
     }
-    fprintf(md_result_file,
-            "  INITIAL_SIZE %s\n"
-            "  ENGINE=%s;\n",
-            row[4], row[5]);
+    if (!is_string_integer(row[4], lengths[4])) return 1;
+    fprintf(md_result_file, "  INITIAL_SIZE %s\n  ENGINE=", row[4]);
+    fprintf_string(row[5], lengths[5], '`', false);
+    fprintf(md_result_file, ";\n");
     check_io(md_result_file);
     if (first) {
       first = 0;
@@ -6061,9 +6297,9 @@ static bool get_view_structure(char *table, char *db) {
       search_len =
           (ulong)(strxmov(ptr, "WITH ", row[0], " CHECK OPTION", NullS) - ptr);
       ptr = replace_buf;
-      replace_len = (ulong)(
-          strxmov(ptr, "*/\n/*!50002 WITH ", row[0], " CHECK OPTION", NullS) -
-          ptr);
+      replace_len = (ulong)(strxmov(ptr, "*/\n/*!50002 WITH ", row[0],
+                                    " CHECK OPTION", NullS) -
+                            ptr);
       replace(&ds_view, search_buf, search_len, replace_buf, replace_len);
     }
 
@@ -6083,19 +6319,23 @@ static bool get_view_structure(char *table, char *db) {
                  host_name_str, &host_name_len);
 
       ptr = search_buf;
-      search_len = (ulong)(
-          strxmov(ptr, "DEFINER=",
-                  quote_name(user_name_str, quoted_user_name_str, false), "@",
-                  quote_name(host_name_str, quoted_host_name_str, false),
-                  " SQL SECURITY ", row[2], NullS) -
-          ptr);
+      search_len =
+          (ulong)(strxmov(
+                      ptr, "DEFINER=",
+                      quote_name(user_name_str, quoted_user_name_str, false),
+                      "@",
+                      quote_name(host_name_str, quoted_host_name_str, false),
+                      " SQL SECURITY ", row[2], NullS) -
+                  ptr);
       ptr = replace_buf;
-      replace_len = (ulong)(
-          strxmov(ptr, "*/\n/*!50013 DEFINER=",
-                  quote_name(user_name_str, quoted_user_name_str, false), "@",
-                  quote_name(host_name_str, quoted_host_name_str, false),
-                  " SQL SECURITY ", row[2], " */\n/*!50001", NullS) -
-          ptr);
+      replace_len =
+          (ulong)(strxmov(
+                      ptr, "*/\n/*!50013 DEFINER=",
+                      quote_name(user_name_str, quoted_user_name_str, false),
+                      "@",
+                      quote_name(host_name_str, quoted_host_name_str, false),
+                      " SQL SECURITY ", row[2], " */\n/*!50001", NullS) -
+                  ptr);
       replace(&ds_view, search_buf, search_len, replace_buf, replace_len);
     }
 

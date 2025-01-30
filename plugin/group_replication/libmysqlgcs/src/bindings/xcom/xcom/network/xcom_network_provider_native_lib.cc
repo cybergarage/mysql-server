@@ -1,5 +1,4 @@
-/* Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights
-reserved.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -47,10 +46,10 @@ static inline void dump_error(int err) {
   if (err) {
 #ifndef XCOM_WITHOUT_OPENSSL
     if (is_ssl_err(err)) {
-      IFDBG(D_BUG, FN; NDBG(from_ssl_err(err), d));
+      XCOM_IFDBG(D_BUG, FN; NDBG(from_ssl_err(err), d));
     } else {
 #endif
-      IFDBG(D_BUG, FN; NDBG(from_errno(err), d); STREXP(strerror(err)));
+      XCOM_IFDBG(D_BUG, FN; NDBG(from_errno(err), d); STREXP(strerror(err)));
 #ifndef XCOM_WITHOUT_OPENSSL
     }
 #endif
@@ -236,12 +235,13 @@ result Xcom_network_provider_library::announce_tcp(xcom_port port) {
     // IPv4 socket.
     /* purecov: begin deadcode */
     fd = create_server_socket_v4();
+    free(sock_addr);
+    sock_addr = nullptr;
+
     if (fd.val < 0) {
       return fd;
     }
 
-    free(sock_addr);
-    sock_addr = nullptr;
     init_server_addr(&sock_addr, &sock_addr_len, port, AF_INET);
     if (bind(fd.val, sock_addr, sock_addr_len) < 0) {
       int err = to_errno(GET_OS_ERR);

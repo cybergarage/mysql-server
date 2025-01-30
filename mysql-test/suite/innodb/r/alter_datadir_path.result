@@ -232,46 +232,70 @@ DROP TABLE dbtest.t7c;
 CREATE TABLE `t8a` (a INT, b INT) PARTITION BY RANGE(a) (PARTITION p0 VALUES LESS THAN (10) DATA DIRECTORY='MYSQL_TMP_DIR/external_dir', PARTITION p1 VALUES LESS THAN (20) DATA DIRECTORY='MYSQL_TMP_DIR/external_dir2');
 CREATE TABLE `t8b` (a INT, b INT) PARTITION BY RANGE(a) (PARTITION p0 VALUES LESS THAN (10) DATA DIRECTORY='MYSQL_TMP_DIR/external_dir', PARTITION p1 VALUES LESS THAN (20) DATA DIRECTORY='MYSQL_TMP_DIR/external_dir2');
 CREATE TABLE `t8c` (a INT, b INT) PARTITION BY RANGE(a) (PARTITION p0 VALUES LESS THAN (10) DATA DIRECTORY='MYSQL_TMP_DIR/external_dir', PARTITION p1 VALUES LESS THAN (20) DATA DIRECTORY='MYSQL_TMP_DIR/external_dir2');
+# Partition table with one partition in external directory and one in default directory
+CREATE TABLE `t8d` (a INT, b INT) PARTITION BY RANGE(a) (PARTITION p0 VALUES LESS THAN (10) DATA DIRECTORY='MYSQL_TMP_DIR/external_dir', PARTITION p1 VALUES LESS THAN (20) );
 # Shutdown server
-# Check that for partition p0 for t8a, t8b, t8c exist in EXTERNAL_DIR and partition p1 for for t8a, t8b, t8c exist in EXTERNAL_DIR2
+# Check that for partition p0 for t8a, t8b, t8c and t8d exist in EXTERNAL_DIR and partition p1 for for t8a, t8b, t8c exist in EXTERNAL_DIR2
 # Listing EXTERNAL_DIR
 t8a#p#p0.ibd
 t8b#p#p0.ibd
 t8c#p#p0.ibd
+t8d#p#p0.ibd
 # Listing EXTERNAL_DIR2
 t8a#p#p1.ibd
 t8b#p#p1.ibd
 t8c#p#p1.ibd
+# List default directory. t8d's p1 partition should be present
+t8d#p#p1.ibd
 # Restart the server
 # restart: --innodb-directories=MYSQL_TMP_DIR/external_dir;MYSQL_TMP_DIR/external_dir2
 # Alter table
 ALTER TABLE dbtest.t8a FORCE;
 ALTER TABLE dbtest.t8b FORCE, ALGORITHM=INPLACE;
 ALTER TABLE dbtest.t8c FORCE, ALGORITHM=COPY;
+ALTER TABLE dbtest.t8d FORCE, ALGORITHM=COPY;
 # Check that for partition p0 for t8a, t8b, t8c still exist in EXTERNAL_DIR and partition p1 for for t8a, t8b, t8c still exist in EXTERNAL_DIR2
 # Listing EXTERNAL_DIR
 t8a#p#p0.ibd
 t8b#p#p0.ibd
 t8c#p#p0.ibd
+t8d#p#p0.ibd
 # Listing EXTERNAL_DIR2
 t8a#p#p1.ibd
 t8b#p#p1.ibd
 t8c#p#p1.ibd
+# List default directory. t8d's p1 partition should be present
+t8d#p#p1.ibd
 # Shutdown server
-# Now lets move all partitioned tables p0 of t8a, t8b, t8c from EXTERNAL_DIR and partitioned tables p1 of t8a, t8b, t8c from EXTERNAL_DIR2 to default directory
+# Now lets move all partitioned tables p0 of t8a, t8b, t8c, t8d from EXTERNAL_DIR and partitioned tables p1 of t8a, t8b, t8c from EXTERNAL_DIR2 to default directory
 # Restart the server
 # restart: --innodb-directories=MYSQL_TMP_DIR/external_dir;MYSQL_TMP_DIR/external_dir2
 # Alter table
 ALTER TABLE dbtest.t8a FORCE;
 ALTER TABLE dbtest.t8b FORCE, ALGORITHM=INPLACE;
 ALTER TABLE dbtest.t8c FORCE, ALGORITHM=COPY;
-# Check that all the partitioned tables for t8a, t8b, t8c now exist in default directory
+# Check that all the partitioned tables for t8a, t8b, t8c and t8d now exist in default directory
 t8a#p#p0.ibd
 t8a#p#p1.ibd
 t8b#p#p0.ibd
 t8b#p#p1.ibd
 t8c#p#p0.ibd
 t8c#p#p1.ibd
+t8d#p#p0.ibd
+t8d#p#p1.ibd
+# Check that EXTERNAL_DIR and EXTERNAL_DIR2 are empty
+# Listing EXTERNAL_DIR
+# Listing EXTERNAL_DIR2
+ALTER TABLE dbtest.t8d FORCE, ALGORITHM=COPY;
+# Check that all the partitioned tables for t8a, t8b, t8c and t8d now exist in default directory
+t8a#p#p0.ibd
+t8a#p#p1.ibd
+t8b#p#p0.ibd
+t8b#p#p1.ibd
+t8c#p#p0.ibd
+t8c#p#p1.ibd
+t8d#p#p0.ibd
+t8d#p#p1.ibd
 # Check that EXTERNAL_DIR and EXTERNAL_DIR2 are empty
 # Listing EXTERNAL_DIR
 # Listing EXTERNAL_DIR2
@@ -279,6 +303,7 @@ t8c#p#p1.ibd
 DROP TABLE dbtest.t8a;
 DROP TABLE dbtest.t8b;
 DROP TABLE dbtest.t8c;
+DROP TABLE dbtest.t8d;
 # Clean up for other tests
 # 2. Creating partitioned table without data directory clause but moving each partition to different external directories
 # Partition tables
@@ -322,72 +347,4 @@ DROP TABLE dbtest.t9b;
 DROP TABLE dbtest.t9c;
 DROP DATABASE dbtest;
 # restart: 
-# Shutdown server
-# Part 1: Steps already executed in older version of mysqld i.e., 8.4 which does not contain the fix for Bug #33398681
-# 1a. Build 8.4 and create data_dir folder in it. Initialize mysqld in this data_dir folder. This will be the default datadir for 8.4
-# 1b. Start mysql client and create database test_upgsc and create tables t7a, t7b t7c in it
-# 1c. Shutdown the server and move t7a.ibd, t7b.ibd, t7c.ibd to new external directory d1 and delete database folder test_upgsc in default directory data_dir
-# 1d. Start and shutdown the server again to make ibd files get recognized as moved in 8.4
-# 1e. Zip this data_dir and new external dir d1 as new_innodbdir into MYSQL_TEST_DIR/std_data/data84_with_externally_stored_tablespaces.zip
-# Part 2: Steps to be executed in the current version i.e., in this test
-# 2a. Copy the data84_with_externally_stored_tablespaces.zip from MYSQL_TEST_DIR/std_data/ to MYSQL_TMP_DIR/test_Bug33398681/ as data84.zip
-# 2b. Check that the zip file data84.zip exists in working MYSQL_TMP_DIR/test_Bug33398681/ folder and unzip it in the same directory
-# 2c. Check that data_dir and new_innodbdir are existing in MYSQL_TMP_DIR/test_Bug33398681/ and list all the files
-# 2d. Set MYSQLD_NEW_DATADIR as MYSQL_TMP_DIR/test_Bug33398681/data_dir and EXTERNAL_DIR3 AS MYSQL_TMP_DIR/test_Bug33398681/new_innodbdir
-# 2e. Start the server with datadir=MYSQLD_NEW_DATADIR and innodb-directories=EXTERNAL_DIR3 options
-# 2f. Trigger Alter table force for t7a, t7b, t7c
-# 2g. Verify that the ibd files for t7a, t7b, t7c exist in EXTERNAL_DIR3
-# Copy the zip directory of 8.4 from MYSQL_TEST_DIR/std_data/ to MYSQL_TMP_DIR/test_Bug33398681 working location.
-# Check that the file exists in the working folder.
-# Unzip the zip file.
-# Check that the file exists in the working folder.
-#ib_16384_0.dblwr
-#ib_16384_1.dblwr
-#innodb_redo
-#innodb_temp
-auto.cnf
-binlog.000001
-binlog.000002
-binlog.index
-ca-key.pem
-ca.pem
-client-cert.pem
-client-key.pem
-debug.log
-error.log
-ib_buffer_pool
-ibdata1
-mysql
-mysql.ibd
-mysql_upgrade_history
-performance_schema
-private_key.pem
-public_key.pem
-server-cert.pem
-server-key.pem
-sys
-undo_001
-undo_002
-test_upgsc
-t7a.ibd
-t7b.ibd
-t7c.ibd
-# Set different path for --datadir which points to old version 8.4
-# Set EXTERNAL_DIR3
-# Check that the ibd files for t7a, t7b, t7c exist in EXTERNAL_DIR3
-t7a.ibd
-t7b.ibd
-t7c.ibd
-# Restart the server
-# restart: --datadir=MYSQL_TMP_DIR/test_Bug33398681/data_dir --innodb-directories=MYSQL_TMP_DIR/test_Bug33398681/new_innodbdir/ --lower_case_table_names=1
-# Alter table
-ALTER TABLE test_upgsc.t7a FORCE;
-ALTER TABLE test_upgsc.t7b FORCE, ALGORITHM=INPLACE;
-ALTER TABLE test_upgsc.t7c FORCE, ALGORITHM=COPY;
-# Check that the ibd files for t7a, t7b, t7c still exist in EXTERNAL_DIR3
-t7a.ibd
-t7b.ibd
-t7c.ibd
-# Clean Up
-# restart: --datadir=MYSQLD_DATADIR --innodb-directories=
 # End Test

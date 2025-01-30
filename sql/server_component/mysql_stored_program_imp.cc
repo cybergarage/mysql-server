@@ -42,6 +42,15 @@ constexpr auto MYSQL_SUCCESS = 0;
 constexpr auto MYSQL_FAILURE = 1;
 
 /**
+  Helper function to get the count of the imported libraries.
+*/
+[[nodiscard]] auto get_libraries_count(
+    const mem_root_deque<sp_name_with_alias> *libraries) -> uint32_t {
+  if (!libraries || libraries->empty()) return 0;  // No libraries imported.
+  return libraries->size();
+}
+
+/**
   Implementation of the mysql_stored_program services
 */
 /**
@@ -56,6 +65,7 @@ constexpr auto MYSQL_FAILURE = 1;
   "sp_body"        -> mysql_cstring_with_length *
   "sp_type"        -> uint16_t
   "argument_count" -> uint32_t
+  "import_count"   -> uint32_t
   @note Have the key at least 7 characters long, with unique first 8 characters.
 
   @param [in]  sp_handle Handle to stored procedure structure
@@ -97,6 +107,9 @@ DEFINE_BOOL_METHOD(mysql_stored_program_metadata_query_imp::get,
   else if (strcmp("argument_count", key) == 0)
     *reinterpret_cast<uint32_t *>(value) =
         sp->get_root_parsing_context()->context_var_count();
+  else if (strcmp("import_count", key) == 0)
+    *reinterpret_cast<uint32_t *>(value) =
+        get_libraries_count(sp->m_chistics->get_imported_libraries());
   else
     return MYSQL_FAILURE;
   return MYSQL_SUCCESS;
@@ -109,15 +122,15 @@ DEFINE_BOOL_METHOD(mysql_stored_program_metadata_query_imp::get,
 /**
   Get stored program argument metadata
 
-  "argument_name" -> const char *
-  "sql_type"      -> uint64_t
-  "in_variable"   -> boolean
-  "out_variable"  -> boolean
-  "is_signed"     -> boolean (Applicable to numeric data types)
-  "is_nullable"   -> boolean
-  "byte_length"   -> uint64_t
-  "char_length"   -> uint64_t (Applicable to string data types)
-  "charset"       -> char const *
+  "argument_name"   -> const char *
+  "sql_type"        -> uint64_t
+  "in_variable"     -> boolean
+  "out_variable"    -> boolean
+  "is_signed"       -> boolean (Applicable to numeric data types)
+  "is_nullable"     -> boolean
+  "charset"         -> char const *
+  "max_byte_length" -> size_t (Applicable to string/blob data types)
+
   @note Have the key at least 7 characters long, with unique first 8 characters.
 
   @returns status of get operation
@@ -247,14 +260,12 @@ static int get_field_metadata_internal(Create_field &field, bool input,
       default:
         return MYSQL_FAILURE;
     }
-  else if (strcmp("byte_length", key) == 0)
-    *reinterpret_cast<size_t *>(value) = field.pack_length();
-  else if (strcmp("char_length", key) == 0)
-    *reinterpret_cast<size_t *>(value) = field.key_length();
   else if (strcmp("charset", key) == 0)
     *reinterpret_cast<char const **>(value) = field.charset->csname;
   else if (strcmp("decimals", key) == 0)
     *reinterpret_cast<uint32_t *>(value) = field.decimals;
+  else if (strcmp("max_byte_length", key) == 0)
+    *reinterpret_cast<size_t *>(value) = field.max_display_width_in_bytes();
   else
     return MYSQL_FAILURE;
   return MYSQL_SUCCESS;
@@ -263,15 +274,14 @@ static int get_field_metadata_internal(Create_field &field, bool input,
 /**
   Get stored program argument metadata
 
-  "argument_name" -> const char *
-  "sql_type"      -> uint64_t
-  "in_variable"   -> boolean
-  "out_variable"  -> boolean
-  "is_signed"     -> boolean (Applicable to numeric data types)
-  "is_nullable"   -> boolean
-  "byte_length"   -> uint64_t
-  "char_length"   -> uint64_t (Applicable to string data types)
-  "charset"       -> char const *
+  "argument_name"   -> const char *
+  "sql_type"        -> uint64_t
+  "in_variable"     -> boolean
+  "out_variable"    -> boolean
+  "is_signed"       -> boolean (Applicable to numeric data types)
+  "is_nullable"     -> boolean
+  "charset"         -> char const *
+  "max_byte_length" -> size_t (Applicable to string/blob data types)
   @note Have the key at least 7 characters long, with unique first 8 characters.
 
   @param [in]  sp_handle    Handle to stored procedure structure
@@ -301,15 +311,14 @@ DEFINE_BOOL_METHOD(mysql_stored_program_argument_metadata_query_imp::get,
 /**
   Get stored program return metadata
 
-  "argument_name" -> const char *
-  "sql_type"      -> uint64_t
-  "in_variable"   -> boolean
-  "out_variable"  -> boolean
-  "is_signed"     -> boolean (Applicable to numeric data types)
-  "is_nullable"   -> boolean
-  "byte_length"   -> uint64_t
-  "char_length"   -> uint64_t (Applicable to string data types)
-  "charset"       -> char const *
+  "argument_name"   -> const char *
+  "sql_type"        -> uint64_t
+  "in_variable"     -> boolean
+  "out_variable"    -> boolean
+  "is_signed"       -> boolean (Applicable to numeric data types)
+  "is_nullable"     -> boolean
+  "charset"         -> char const *
+  "max_byte_length" -> size_t (Applicable to string/blob data types)
   @note Have the key at least 7 characters long, with unique first 8 characters.
 
   @param [in]  sp_handle    Handle to stored procedure structure
@@ -335,14 +344,14 @@ auto static set_variable(stored_program_runtime_context sp_runtime_context,
   if (index < 0) return MYSQL_FAILURE;
   auto runtime_context = reinterpret_cast<sp_rcontext *>(sp_runtime_context);
   if (runtime_context == nullptr) runtime_context = current_thd->sp_runtime_ctx;
-  return runtime_context->set_variable(current_thd, index, &item);
+  return runtime_context->set_variable(current_thd, false, index, &item);
 }
 
 auto static set_return_value(stored_program_runtime_context sp_runtime_context,
                              Item *item) -> int {
   auto runtime_context = reinterpret_cast<sp_rcontext *>(sp_runtime_context);
   if (runtime_context == nullptr) runtime_context = current_thd->sp_runtime_ctx;
-  return runtime_context->set_return_value(current_thd, &item);
+  return runtime_context->set_return_value(current_thd, false, &item);
 }
 
 auto static get_item(stored_program_runtime_context sp_runtime_context,
@@ -1354,4 +1363,42 @@ DEFINE_BOOL_METHOD(mysql_stored_program_external_program_handle_imp::set,
   auto sp = reinterpret_cast<sp_head *>(sp_handle);
   if (!is_sp_in_current_thd(sp)) return MYSQL_FAILURE;
   return sp->set_external_program_handle(value);
+}
+
+DEFINE_BOOL_METHOD(mysql_stored_program_import_metadata_query_imp::get,
+                   (stored_program_handle sp_handle, uint32_t index,
+                    mysql_cstring_with_length *schema_name,
+                    mysql_cstring_with_length *library_name,
+                    mysql_cstring_with_length *version,
+                    mysql_cstring_with_length *alias,
+                    [[maybe_unused]] void *extension)) {
+  auto sp = reinterpret_cast<sp_head *>(sp_handle);
+
+  if (!sp_handle || !schema_name || !library_name || !version || !alias)
+    return MYSQL_FAILURE;
+
+  try {
+    auto imported_libraries = sp->m_chistics->get_imported_libraries();
+    if (!imported_libraries) return MYSQL_FAILURE;
+
+    if (index >= imported_libraries->size()) return MYSQL_FAILURE;
+    auto &library = (*imported_libraries)[index];
+
+    if (library.m_db.str) {
+      schema_name->str = library.m_db.str;
+      schema_name->length = library.m_db.length;
+    } else {
+      // Use the routine's schema name as the library's schema.
+      schema_name->str = sp->m_db.str;
+      schema_name->length = sp->m_db.length;
+    }
+    library_name->str = library.m_name.str;
+    library_name->length = library.m_name.length;
+    alias->str = library.m_alias.str;
+    alias->length = library.m_alias.length;
+  } catch (...) {
+    return MYSQL_FAILURE;
+  }
+
+  return MYSQL_SUCCESS;
 }

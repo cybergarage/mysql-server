@@ -84,6 +84,16 @@ class Item_subselect : public Item_result_field {
   Query_expression *query_expr() const { return m_query_expr; }
 
   /**
+    For Item_subselect constructor with POS parameter, the contextualized
+    field must be transitioned explicitly.
+  */
+  void set_contextualized() {
+#ifndef NDEBUG
+    assert(!contextualized);
+    contextualized = true;
+#endif  // NDEBUG
+  }
+  /**
      If !=NO_PLAN_IDX: this Item is in the condition attached to the JOIN_TAB
      having this index in the parent JOIN.
   */
@@ -113,6 +123,13 @@ class Item_subselect : public Item_result_field {
   void accumulate_used_tables(table_map add_tables) {
     m_used_tables_cache |= add_tables;
     m_subquery_used_tables |= add_tables;
+  }
+
+  /// Return whether this subquery references any tables in the directly
+  /// containing query block, i.e. whether there are outer references to the
+  /// containing block inside the subquery.
+  bool contains_outer_references() const {
+    return (subquery_used_tables() & ~PSEUDO_TABLE_BITS) != 0;
   }
 
   virtual Subquery_type subquery_type() const = 0;
@@ -265,7 +282,8 @@ class Item_subselect : public Item_result_field {
 
 class Item_singlerow_subselect : public Item_subselect {
  public:
-  Item_singlerow_subselect(Query_block *query_block);
+  explicit Item_singlerow_subselect(Query_block *query_block);
+  Item_singlerow_subselect(const POS &pos, Query_block *query_block);
   Item_singlerow_subselect() : Item_subselect() {}
 
   bool fix_fields(THD *thd, Item **ref) override;
@@ -446,12 +464,11 @@ class Item_exists_subselect : public Item_subselect {
     Create an Item that represents an EXISTS subquery predicate, or any
     quantified comparison predicate that uses the same base class.
 
+    @param pos         String representing the parsed item
     @param query_block First query block of query expression representing
                        the contained subquery.
   */
-  explicit Item_exists_subselect(Query_block *query_block);
-
-  Item_exists_subselect() : Item_subselect() {}
+  Item_exists_subselect(const POS &pos, Query_block *query_block);
 
   explicit Item_exists_subselect(const POS &pos) : super(pos) {}
 
@@ -586,11 +603,12 @@ class Item_in_subselect : public Item_exists_subselect {
   typedef Item_exists_subselect super;
 
  public:
-  Item_in_subselect(Item *left_expr, Query_block *query_block);
+  Item_in_subselect(const POS &pos, Item *left_expr, Query_block *query_block);
   Item_in_subselect(const POS &pos, Item *left_expr,
                     PT_subquery *pt_subquery_arg);
 
-  Item_in_subselect() : Item_exists_subselect(), pt_subselect(nullptr) {}
+  Item_in_subselect(const POS &pos)
+      : Item_exists_subselect(pos), pt_subselect(nullptr) {}
 
   bool do_itemize(Parse_context *pc, Item **res) override;
 
@@ -734,7 +752,7 @@ class Item_in_subselect : public Item_exists_subselect {
        was done.
     */
     bool dependent_after;
-  } * m_in2exists_info{nullptr};
+  } *m_in2exists_info{nullptr};
 
   PT_subquery *pt_subselect;
 
@@ -752,8 +770,9 @@ class Item_in_subselect : public Item_exists_subselect {
 */
 class Item_allany_subselect final : public Item_in_subselect {
  public:
-  Item_allany_subselect(Item *left_expr, chooser_compare_func_creator fc,
-                        Query_block *select, bool all);
+  Item_allany_subselect(const POS &pos, Item *left_expr,
+                        chooser_compare_func_creator fc, Query_block *select,
+                        bool all);
 
   Subquery_type subquery_type() const override {
     return m_all ? ALL_SUBQUERY : ANY_SUBQUERY;
@@ -834,7 +853,7 @@ class subselect_indexsubquery_engine {
   This function is actually defined in sql_parse.cc, but it depends on
   chooser_compare_func_creator defined in this file.
  */
-Item *all_any_subquery_creator(Item *left_expr,
+Item *all_any_subquery_creator(THD *thd, const POS &pos, Item *left_expr,
                                chooser_compare_func_creator cmp, bool all,
                                Query_block *select);
 

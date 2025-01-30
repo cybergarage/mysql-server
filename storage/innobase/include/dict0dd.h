@@ -931,11 +931,6 @@ dberr_t dd_table_load_fk_from_dd(dict_table_t *m_table,
                                  dict_err_ignore_t ignore_err,
                                  bool dict_locked);
 
-/** Set the AUTO_INCREMENT attribute.
-@param[in,out]  se_private_data dd::Table::se_private_data
-@param[in]      autoinc         the auto-increment value */
-void dd_set_autoinc(dd::Properties &se_private_data, uint64_t autoinc);
-
 /** Scan a new dd system table, like mysql.tables...
 @param[in]      thd             THD
 @param[in,out]  mdl             MDL lock
@@ -1204,6 +1199,13 @@ dict_table_t *dd_table_open_on_name(THD *thd, MDL_ticket **mdl,
                                     ulint ignore_err, int *error = nullptr);
 
 /** Returns a cached table object based on table id.
+This function does NOT move the table to the front of MRU, because currently it
+is called in contexts where we don't really mean to "use" the table, and believe
+that it would actually hurt performance if we moved it to the front, such as:
+1. The table would be evicted soon anyway.
+2. A batch of FTS tables would be opened from background thread,
+   and it is not proper to move these tables to mru.
+3. All tables in memory will be accessed sequentially, so it is useless to move.
 @param[in]      table_id        table id
 @param[in]      dict_locked     true=data dictionary locked
 @return table, NULL if does not exist */

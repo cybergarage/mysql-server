@@ -36,7 +36,7 @@
 #include "mysql/service_srv_session_bits.h" /* MYSQL_SESSION, srv_session_error_cb */
 
 #ifndef MYSQL_ABI_CHECK
-#include "mysql/plugin.h" /* MYSQL_THD */
+#include "mysql/components/services/bits/thd.h" /* MYSQL_THD */
 #endif
 
 extern "C" struct srv_session_service_st {
@@ -54,7 +54,7 @@ extern "C" struct srv_session_service_st {
   int (*server_is_available)();
 
   int (*attach_session)(MYSQL_SESSION session, MYSQL_THD *ret_previous_thd);
-} * srv_session_service;
+} *srv_session_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 

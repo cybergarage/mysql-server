@@ -490,7 +490,7 @@ static bool row_ins_cascade_ancestor_updates_table(
 
   n_fields_updated = 0;
 
-  *fts_col_affected = false;
+  *fts_col_affected = foreign->is_fts_col_affected();
 
   if (table->fts) {
     doc_id_pos = dict_table_get_nth_col_pos(table, table->fts->doc_col);
@@ -502,6 +502,11 @@ static bool row_ins_cascade_ancestor_updates_table(
 
     for (j = 0; j < parent_update->n_fields; j++) {
       const upd_field_t *parent_ufield = &parent_update->fields[j];
+
+      /* Skip if the updated field is virtual */
+      if (parent_ufield->is_virtual()) {
+        continue;
+      }
 
       if (parent_ufield->field_no == parent_field_no) {
         ulint min_size;
@@ -586,14 +591,6 @@ static bool row_ins_cascade_ancestor_updates_table(
 
           row_mysql_pad_col(mbminlen, pad, pad_len);
           dfield_set_data(&ufield->new_val, padded_data, min_size);
-        }
-
-        /* Check whether the current column has
-        FTS index on it */
-        if (table->fts &&
-            dict_table_is_fts_column(table->fts->indexes, dict_col_get_no(col),
-                                     col->is_virtual()) != ULINT_UNDEFINED) {
-          *fts_col_affected = true;
         }
 
         /* If Doc ID is updated, check whether the
@@ -981,7 +978,6 @@ func_exit:
   trx_t *trx;
   mem_heap_t *tmp_heap = nullptr;
   doc_id_t doc_id = FTS_NULL_DOC_ID;
-  bool fts_col_affacted = false;
 
   DBUG_TRACE;
   ut_a(thr);
@@ -1151,8 +1147,15 @@ func_exit:
   if (table->fts) {
     doc_id = fts_get_doc_id_from_rec(table, clust_rec, clust_index, tmp_heap);
   }
-  if (cascade->is_delete && foreign->v_cols != nullptr &&
-      foreign->v_cols->size() > 0 && table->vc_templ == nullptr) {
+
+  /* A cascade delete from the parent table triggers delete on the child
+  table. Before a clustered index record is deleted in the child table,
+  a copy of row is built to remove secondary index records. This copy of
+  the row requires virtual columns to be materialized. Hence, if child
+  table has any virtual columns which are indexed, we have to initialize
+  virtual column template. */
+  if (cascade->is_delete && dict_table_has_indexed_v_cols(table) &&
+      table->vc_templ == nullptr) {
     innobase_init_vc_templ(table);
   }
 
@@ -1179,16 +1182,9 @@ func_exit:
       ufield->orig_len = 0;
       ufield->exp = nullptr;
       dfield_set_null(&ufield->new_val);
-
-      if (table->fts &&
-          dict_table_is_fts_column(table->fts->indexes, index->get_col_no(i),
-                                   index->get_col(i)->is_virtual()) !=
-              ULINT_UNDEFINED) {
-        fts_col_affacted = true;
-      }
     }
 
-    if (fts_col_affacted) {
+    if (foreign->is_fts_col_affected()) {
       fts_trx_add_op(trx, table, doc_id, FTS_DELETE, nullptr);
     }
 
@@ -1203,26 +1199,18 @@ func_exit:
 
   } else if (table->fts && cascade->is_delete) {
     /* DICT_FOREIGN_ON_DELETE_CASCADE case */
-    for (i = 0; i < foreign->n_fields; i++) {
-      if (table->fts &&
-          dict_table_is_fts_column(table->fts->indexes, index->get_col_no(i),
-                                   index->get_col(i)->is_virtual()) !=
-              ULINT_UNDEFINED) {
-        fts_col_affacted = true;
-      }
-    }
-
-    if (fts_col_affacted) {
+    if (foreign->is_fts_col_affected()) {
       fts_trx_add_op(trx, table, doc_id, FTS_DELETE, nullptr);
     }
   }
 
   if (!node->is_delete && (foreign->type & DICT_FOREIGN_ON_UPDATE_CASCADE)) {
+    bool fts_col_affected = false;
     /* Build the appropriate update vector which sets changing
     foreign->n_fields first fields in rec to new values */
 
     n_to_update = row_ins_cascade_calc_update_vec(node, foreign, tmp_heap, trx,
-                                                  &fts_col_affacted);
+                                                  &fts_col_affected);
 
     if (foreign->v_cols != nullptr && foreign->v_cols->size() > 0) {
       row_ins_foreign_fill_virtual(cascade, clust_rec, clust_index, node,
@@ -1259,7 +1247,7 @@ func_exit:
     }
 
     /* Mark the old Doc ID as deleted */
-    if (fts_col_affacted) {
+    if (fts_col_affected) {
       ut_ad(table->fts);
       fts_trx_add_op(trx, table, doc_id, FTS_DELETE, nullptr);
     }
@@ -2284,7 +2272,7 @@ of a clustered index entry.
 @retval DB_OUT_OF_FILE_SPACE out of file-space */
 static dberr_t row_ins_index_entry_big_rec_func(
     trx_t *trx, const dtuple_t *entry, const big_rec_t *big_rec, ulint *offsets,
-    mem_heap_t **heap, IF_DEBUG(const THD *thd, ) dict_index_t *index) {
+    mem_heap_t **heap, IF_DEBUG(THD *thd, ) dict_index_t *index) {
   mtr_t mtr;
   btr_pcur_t pcur;
   rec_t *rec;
@@ -2292,7 +2280,7 @@ static dberr_t row_ins_index_entry_big_rec_func(
 
   ut_ad(index->is_clustered());
 
-  DEBUG_SYNC_C_IF_THD(thd, "before_row_ins_extern_latch");
+  DEBUG_SYNC(thd, "before_row_ins_extern_latch");
   DEBUG_SYNC_C("before_insertion_of_blob");
 
   mtr_start(&mtr);
@@ -2305,10 +2293,10 @@ static dberr_t row_ins_index_entry_big_rec_func(
   offsets = rec_get_offsets(rec, index, offsets, ULINT_UNDEFINED,
                             UT_LOCATION_HERE, heap);
 
-  DEBUG_SYNC_C_IF_THD(thd, "before_row_ins_extern");
+  DEBUG_SYNC(thd, "before_row_ins_extern");
   error = lob::btr_store_big_rec_extern_fields(
       trx, &pcur, nullptr, offsets, big_rec, &mtr, lob::OPCODE_INSERT);
-  DEBUG_SYNC_C_IF_THD(thd, "after_row_ins_extern");
+  DEBUG_SYNC(thd, "after_row_ins_extern");
 
   if (error == DB_SUCCESS && dict_index_is_online_ddl(index)) {
     row_log_table_insert(pcur.get_rec(), entry, index, offsets);
@@ -2321,9 +2309,11 @@ static dberr_t row_ins_index_entry_big_rec_func(
   return (error);
 }
 
-static inline dberr_t row_ins_index_entry_big_rec(
-    trx_t *trx, const dtuple_t *e, const big_rec_t *big, ulint *ofs,
-    mem_heap_t **heap, dict_index_t *index, const THD *thd [[maybe_unused]]) {
+static inline dberr_t row_ins_index_entry_big_rec(trx_t *trx, const dtuple_t *e,
+                                                  const big_rec_t *big,
+                                                  ulint *ofs, mem_heap_t **heap,
+                                                  dict_index_t *index,
+                                                  THD *thd [[maybe_unused]]) {
   return row_ins_index_entry_big_rec_func(trx, e, big, ofs, heap,
                                           IF_DEBUG(thd, ) index);
 }

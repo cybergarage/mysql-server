@@ -140,19 +140,19 @@
 #include "sql/sql_load.h"       // Sql_cmd_load_table
 #include "sql/sql_optimizer.h"  // JOIN
 #include "sql/sql_parse.h"      // check_stack_overrun
-#include "sql/sql_show.h"       // append_identifier
+#include "sql/sql_show.h"       // append_identifier_*
 #include "sql/sql_time.h"       // TIME_from_longlong_packed
 #include "sql/strfunc.h"        // find_type
 #include "sql/system_variables.h"
 #include "sql/thd_raii.h"
-#include "sql/val_int_compare.h"    // Integer_value
-#include "sql/vector_conversion.h"  // get_dimensions
+#include "sql/val_int_compare.h"  // Integer_value
 #include "sql_string.h"
 #include "storage/perfschema/terminology_use_previous_enum.h"
 #include "string_with_len.h"
 #include "template_utils.h"
 #include "template_utils.h"  // pointer_cast
 #include "thr_mutex.h"
+#include "vector-common/vector_constants.h"  // get_dimensions
 
 using std::max;
 using std::min;
@@ -1533,13 +1533,11 @@ void Item_num_op::set_numeric_type(void) {
     hybrid_type = INT_RESULT;
     result_precision();
   }
-  DBUG_PRINT("info", ("Type: %s", (hybrid_type == REAL_RESULT
-                                       ? "REAL_RESULT"
-                                       : hybrid_type == DECIMAL_RESULT
-                                             ? "DECIMAL_RESULT"
-                                             : hybrid_type == INT_RESULT
-                                                   ? "INT_RESULT"
-                                                   : "--ILLEGAL!!!--")));
+  DBUG_PRINT("info",
+             ("Type: %s", (hybrid_type == REAL_RESULT      ? "REAL_RESULT"
+                           : hybrid_type == DECIMAL_RESULT ? "DECIMAL_RESULT"
+                           : hybrid_type == INT_RESULT     ? "INT_RESULT"
+                                                       : "--ILLEGAL!!!--")));
 }
 
 /**
@@ -1569,13 +1567,11 @@ void Item_func_num1::set_numeric_type() {
     default:
       assert(0);
   }
-  DBUG_PRINT("info", ("Type: %s", (hybrid_type == REAL_RESULT
-                                       ? "REAL_RESULT"
-                                       : hybrid_type == DECIMAL_RESULT
-                                             ? "DECIMAL_RESULT"
-                                             : hybrid_type == INT_RESULT
-                                                   ? "INT_RESULT"
-                                                   : "--ILLEGAL!!!--")));
+  DBUG_PRINT("info",
+             ("Type: %s", (hybrid_type == REAL_RESULT      ? "REAL_RESULT"
+                           : hybrid_type == DECIMAL_RESULT ? "DECIMAL_RESULT"
+                           : hybrid_type == INT_RESULT     ? "INT_RESULT"
+                                                       : "--ILLEGAL!!!--")));
 }
 
 void Item_func_num1::fix_num_length_and_dec() {
@@ -3372,13 +3368,11 @@ bool Item_func_int_val::resolve_type_inner(THD *) {
     default:
       assert(0);
   }
-  DBUG_PRINT("info", ("Type: %s", (hybrid_type == REAL_RESULT
-                                       ? "REAL_RESULT"
-                                       : hybrid_type == DECIMAL_RESULT
-                                             ? "DECIMAL_RESULT"
-                                             : hybrid_type == INT_RESULT
-                                                   ? "INT_RESULT"
-                                                   : "--ILLEGAL!!!--")));
+  DBUG_PRINT("info",
+             ("Type: %s", (hybrid_type == REAL_RESULT      ? "REAL_RESULT"
+                           : hybrid_type == DECIMAL_RESULT ? "DECIMAL_RESULT"
+                           : hybrid_type == INT_RESULT     ? "INT_RESULT"
+                                                       : "--ILLEGAL!!!--")));
 
   return false;
 }
@@ -3791,9 +3785,11 @@ double Item_func_units::val_real() {
 
 bool Item_func_min_max::resolve_type(THD *thd) {
   // If no arguments have type, type of this operator cannot be determined yet
-  if (args[0]->data_type() == MYSQL_TYPE_INVALID &&
-      args[1]->data_type() == MYSQL_TYPE_INVALID)
-    return false;
+  uint i;
+  for (i = 0; i < arg_count; i++) {
+    if (args[i]->data_type() != MYSQL_TYPE_INVALID) break;
+  }
+  if (i == arg_count) return false;
 
   if (resolve_type_inner(thd)) return true;
   if (reject_geometry_args()) return true;
@@ -3985,8 +3981,11 @@ String *Item_func_min_max::str_op(String *str) {
     */
     String *val_buf = res_in_str ? &m_string_buf : str;
     assert(!res || (res != val_buf && !res->uses_buffer_owned_by(val_buf)));
-    String *val = args[i]->val_str(val_buf);
-    if ((null_value = args[i]->null_value)) return nullptr;
+    String *val = eval_string_arg(collation.collation, args[i], val_buf);
+    if (val == nullptr) {
+      assert(current_thd->is_error() || (args[i]->null_value && is_nullable()));
+      return error_str();
+    }
     if (i == 0 ||
         (sortcmp(val, res, collation.collation) < 0) == m_is_least_func) {
       res = val;
@@ -4795,7 +4794,8 @@ bool udf_handler::call_init_func() {
     f_args.attribute_lengths[i] = args[i]->item_name.length();
     m_args_extension.charset_info[i] = args[i]->collation.collation;
 
-    if (args[i]->const_for_execution() && !args[i]->has_subquery()) {
+    if (args[i]->const_for_execution() && !args[i]->has_subquery() &&
+        !args[i]->has_stored_program()) {
       switch (args[i]->result_type()) {
         case STRING_RESULT:
         case DECIMAL_RESULT: {
@@ -5850,27 +5850,35 @@ longlong Item_func_benchmark::val_int() {
     return 0;
   }
 
+  const int result_type = args[1]->result_type();
+
   null_value = false;
-  for (ulonglong loop = 0; loop < loop_count && !thd->killed; loop++) {
-    switch (args[1]->result_type()) {
-      case REAL_RESULT:
+  switch (result_type) {
+    case REAL_RESULT:
+      for (ulonglong loop = 0; loop < loop_count && !thd->killed; loop++) {
         (void)args[1]->val_real();
-        break;
-      case INT_RESULT:
+      }
+      break;
+    case INT_RESULT:
+      for (ulonglong loop = 0; loop < loop_count && !thd->killed; loop++) {
         (void)args[1]->val_int();
-        break;
-      case STRING_RESULT:
+      }
+      break;
+    case STRING_RESULT:
+      for (ulonglong loop = 0; loop < loop_count && !thd->killed; loop++) {
         (void)args[1]->val_str(&tmp);
-        break;
-      case DECIMAL_RESULT:
+      }
+      break;
+    case DECIMAL_RESULT:
+      for (ulonglong loop = 0; loop < loop_count && !thd->killed; loop++) {
         (void)args[1]->val_decimal(&tmp_decimal);
-        break;
-      case ROW_RESULT:
-      default:
-        // This case should never be chosen
-        assert(0);
-        return 0;
-    }
+      }
+      break;
+    case ROW_RESULT:
+    default:
+      // This case should never be chosen
+      assert(0);
+      return 0;
   }
   return 0;
 }
@@ -7084,8 +7092,8 @@ bool Item_user_var_as_out_param::fix_fields(THD *thd, Item **ref) {
   assert(!fixed);
 
   assert(thd->lex->sql_command == SQLCOM_LOAD);
-  auto exchange_cs =
-      down_cast<Sql_cmd_load_table *>(thd->lex->m_sql_cmd)->m_exchange.cs;
+  const auto *exchange_cs = down_cast<Sql_cmd_load_table *>(thd->lex->m_sql_cmd)
+                                ->m_exchange.file_info.cs;
   /*
     Let us set the same collation which is used for loading
     of fields in LOAD DATA INFILE.
@@ -8506,7 +8514,7 @@ bool Item_func_sp::sp_check_access(THD *thd) {
   DBUG_TRACE;
   assert(m_sp);
   if (check_routine_access(thd, EXECUTE_ACL, m_sp->m_db.str, m_sp->m_name.str,
-                           false, false))
+                           Acl_type::FUNCTION, false))
     return true;
 
   return false;
@@ -8537,8 +8545,9 @@ bool Item_func_sp::fix_fields(THD *thd, Item **ref) {
         thd, m_name_resolution_ctx->view_error_handler,
         m_name_resolution_ctx->view_error_handler_arg);
 
-    const bool res = check_routine_access(thd, EXECUTE_ACL, m_name->m_db.str,
-                                          m_name->m_name.str, false, false);
+    const bool res =
+        check_routine_access(thd, EXECUTE_ACL, m_name->m_db.str,
+                             m_name->m_name.str, Acl_type::FUNCTION, false);
     thd->set_security_context(save_security_ctx);
 
     if (res) return res;
@@ -8565,12 +8574,11 @@ bool Item_func_sp::fix_fields(THD *thd, Item **ref) {
     if (args[i]->data_type() == MYSQL_TYPE_INVALID) {
       sp_variable *var = sp_ctx->find_variable(i);
       if (args[i]->propagate_type(
-              thd,
-              is_numeric_type(var->type)
-                  ? Type_properties(var->type, var->field_def.is_unsigned)
-                  : is_string_type(var->type)
-                        ? Type_properties(var->type, var->field_def.charset)
-                        : Type_properties(var->type)))
+              thd, is_numeric_type(var->type)
+                       ? Type_properties(var->type, var->field_def.is_unsigned)
+                   : is_string_type(var->type)
+                       ? Type_properties(var->type, var->field_def.charset)
+                       : Type_properties(var->type)))
         return true;
     }
   }
@@ -8951,7 +8959,15 @@ longlong Item_func_can_access_routine::val_int() {
   type_ptr->c_ptr_safe();
   definer_ptr->c_ptr_safe();
 
-  const bool is_procedure = (strcmp(type_ptr->ptr(), "PROCEDURE") == 0);
+  enum_sp_type sp_type{};
+  if (strcmp(type_ptr->ptr(), "PROCEDURE") == 0)
+    sp_type = enum_sp_type::PROCEDURE;
+  else if (strcmp(type_ptr->ptr(), "FUNCTION") == 0)
+    sp_type = enum_sp_type::FUNCTION;
+  else if (strcmp(type_ptr->ptr(), "LIBRARY") == 0)
+    sp_type = enum_sp_type::LIBRARY;
+  else
+    assert(false);
 
   // Skip INFORMATION_SCHEMA database
   if (is_infoschema_db(schema_name_ptr->ptr()) ||
@@ -8986,9 +9002,12 @@ longlong Item_func_can_access_routine::val_int() {
 
   if (check_full_access) {
     return full_access ? 1 : 0;
-  } else if (!full_access && !has_partial_view_routine_access(
-                                 thd, schema_name_ptr->ptr(),
-                                 routine_name_ptr->ptr(), is_procedure)) {
+  }
+  assert(sp_type == enum_sp_type::PROCEDURE ||
+         sp_type == enum_sp_type::FUNCTION || sp_type == enum_sp_type::LIBRARY);
+  if (!full_access && !has_partial_view_routine_access(
+                          thd, schema_name_ptr->ptr(), routine_name_ptr->ptr(),
+                          enum_sp_type_to_acl_type(sp_type))) {
     return 0;
   }
 

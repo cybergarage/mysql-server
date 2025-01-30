@@ -157,8 +157,6 @@
     }                                                                     \
   }
 
-extern CHARSET_INFO my_charset_utf16le_bin;
-
 // List of error codes specified with 'error' command.
 Expected_errors *expected_errors = new Expected_errors();
 
@@ -1276,6 +1274,44 @@ static int match_expected_error(struct st_command *command,
   return -1;
 }
 
+/// Generate the message when an error occurred, or no error occurred when one
+/// was expected, and "die" with that message.
+///
+/// @param subject The reason why we die: either that there was an error, or
+/// that there was no error when one was expected.
+/// @param interpolated_query The query that was sent to the server, possibly
+/// after interpolating $variables, if indeed there was any interpolation and
+/// the query is known.
+/// @param uninterpolated_query The query before interpolation.
+/// @param expected_errors String representation of the list of errors that
+/// are expected.
+/// @param actual_errno The numeric error code returned from the server.
+/// @param actual_message The textual message returned from the server.
+/// @param actual_sqlstate The "sqlstate" textual code related to actual_errno.
+void handle_error_and_die(const char *subject, const char *interpolated_query,
+                          const char *uninterpolated_query,
+                          const char *expected_errors,
+                          uint32_t actual_errno = 0,
+                          const char *actual_message = nullptr,
+                          const char *actual_sqlstate = nullptr) {
+  std::stringstream message;
+  message << subject;
+  if (interpolated_query != nullptr) {
+    message << "\nQuery sent to server: '" << interpolated_query << "'"
+            << "\nQuery generated from: '" << uninterpolated_query << "'";
+  } else {
+    message << "\nQuery: '" << uninterpolated_query << "'";
+  }
+  if (expected_errors != nullptr && *expected_errors != '\0') {
+    message << "\nExpected error(s): " << expected_errors;
+  }
+  if (actual_errno != 0) {
+    message << "\nReturned error: " << actual_errno << " (" << actual_sqlstate
+            << "): " << actual_message;
+  }
+  die("%s", message.str().c_str());
+}
+
 /// Handle errors which occurred during execution of a query.
 ///
 /// @param command      Pointer to the st_command structure which holds the
@@ -1284,13 +1320,17 @@ static int match_expected_error(struct st_command *command,
 /// @param err_error    Error message
 /// @param err_sqlstate SQLSTATE that was thrown
 /// @param ds           Dynamic string to store the result.
+/// @param interpolated_query The interpolated query, if it was at all
+///                     interpolated. This will be printed at the end of the
+///                     error message.
 ///
 /// @note
 /// If there is an unexpected error, this function will abort mysqltest
 /// immediately.
 void handle_error(struct st_command *command, std::uint32_t err_errno,
                   const char *err_error, const char *err_sqlstate,
-                  DYNAMIC_STRING *ds) {
+                  DYNAMIC_STRING *ds,
+                  const char *interpolated_query = nullptr) {
   DBUG_TRACE;
 
   if (opt_hypergraph && err_errno == ER_HYPERGRAPH_NOT_SUPPORTED_YET) {
@@ -1303,8 +1343,9 @@ void handle_error(struct st_command *command, std::uint32_t err_errno,
   }
 
   if (command->abort_on_error)
-    die("Query '%s' failed.\nERROR %d (%s): %s", command->query, err_errno,
-        err_sqlstate, err_error);
+    handle_error_and_die("Query failed.", interpolated_query, command->query,
+                         expected_errors->error_list().c_str(), err_errno,
+                         err_error, err_sqlstate);
 
   DBUG_PRINT("info", ("Expected errors count: %zu", expected_errors->count()));
 
@@ -1343,17 +1384,11 @@ void handle_error(struct st_command *command, std::uint32_t err_errno,
   }
 
   if (expected_errors->count()) {
-    if (expected_errors->count() == 1) {
-      die("Query '%s' failed with wrong error %d: '%s', should have failed "
-          "with error '%s'.",
-          command->query, err_errno, err_error,
-          expected_errors->error_list().c_str());
-    } else {
-      die("Query '%s' failed with wrong error %d: '%s', should have failed "
-          "with any of '%s' errors.",
-          command->query, err_errno, err_error,
-          expected_errors->error_list().c_str());
-    }
+    handle_error_and_die(
+        "Query failed with an error different from the expected error(s).",
+        interpolated_query, command->query,
+        expected_errors->error_list().c_str(), err_errno, err_error,
+        err_sqlstate);
   }
 
   revert_properties();
@@ -1366,19 +1401,19 @@ void handle_error(struct st_command *command, std::uint32_t err_errno,
 ///
 /// @param command Pointer to the st_command structure which holds the
 ///                arguments and information for the command.
-void handle_no_error(struct st_command *command) {
+/// @param interpolated_query The interpolated query, if the query was
+///                interpolated. This will be printed at the end of the
+///                error message.
+void handle_no_error(struct st_command *command,
+                     const char *interpolated_query = nullptr) {
   DBUG_TRACE;
 
   if (expected_errors->count()) {
     const int index = match_expected_error(command, 0, "00000");
     if (index == -1) {
-      if (expected_errors->count() == 1) {
-        die("Query '%s' succeeded, should have failed with error '%s'",
-            command->query, expected_errors->error_list().c_str());
-      } else {
-        die("Query '%s' succeeded, should have failed with any of '%s' errors.",
-            command->query, expected_errors->error_list().c_str());
-      }
+      handle_error_and_die("Query was expected to fail, but succeeded.",
+                           interpolated_query, command->query,
+                           expected_errors->error_list().c_str());
     }
   }
 }
@@ -2654,7 +2689,7 @@ static void var_query_set(VAR *var, const char *query, const char **query_end) {
   if (mysql_real_query_wrapper(mysql, ds_query.str,
                                static_cast<ulong>(ds_query.length))) {
     handle_error(curr_command, mysql_errno(mysql), mysql_error(mysql),
-                 mysql_sqlstate(mysql), &ds_res);
+                 mysql_sqlstate(mysql), &ds_res, ds_query.str);
     /* If error was acceptable, return empty string */
     dynstr_free(&ds_query);
     eval_expr(var, "", nullptr);
@@ -2881,7 +2916,7 @@ static void var_set_escape(struct st_command *command, VAR *dst) {
     - the second string,
     - a bool that is false if the parsing succeeded; true if it failed.
   */
-  auto parse_args = [&]() -> auto {
+  auto parse_args = [&]() -> auto{
     // command->first_argument contains '(characters,text)'
     char *p = command->first_argument;
     // Find (
@@ -3021,7 +3056,7 @@ static void var_set_query_get_value(struct st_command *command, VAR *var) {
   if (mysql_real_query_wrapper(mysql, ds_query.str,
                                static_cast<ulong>(ds_query.length))) {
     handle_error(curr_command, mysql_errno(mysql), mysql_error(mysql),
-                 mysql_sqlstate(mysql), &ds_res);
+                 mysql_sqlstate(mysql), &ds_res, ds_query.str);
     /* If error was acceptable, return empty string */
     dynstr_free(&ds_query);
     dynstr_free(&ds_col);
@@ -3279,13 +3314,15 @@ static FILE *my_popen(DYNAMIC_STRING *ds_cmd, const char *mode,
     wchar_t wmode[10];
     uint dummy_errors;
     size_t len;
-    len = my_convert((char *)wcmd, sizeof(wcmd) - sizeof(wcmd[0]),
-                     &my_charset_utf16le_bin, ds_cmd->str,
-                     std::strlen(ds_cmd->str), charset_info, &dummy_errors);
+    const CHARSET_INFO *utf16le_bin =
+        get_charset_by_name("utf16le_bin", MYF(0));
+    len = my_convert((char *)wcmd, sizeof(wcmd) - sizeof(wcmd[0]), utf16le_bin,
+                     ds_cmd->str, std::strlen(ds_cmd->str), charset_info,
+                     &dummy_errors);
     wcmd[len / sizeof(wchar_t)] = 0;
-    len = my_convert((char *)wmode, sizeof(wmode) - sizeof(wmode[0]),
-                     &my_charset_utf16le_bin, mode, std::strlen(mode),
-                     charset_info, &dummy_errors);
+    len =
+        my_convert((char *)wmode, sizeof(wmode) - sizeof(wmode[0]), utf16le_bin,
+                   mode, std::strlen(mode), charset_info, &dummy_errors);
     wmode[len / sizeof(wchar_t)] = 0;
     return _wpopen(wcmd, wmode);
   }
@@ -3557,7 +3594,7 @@ static void free_dynamic_strings(T *val) {
 ///              the function, through recursion, end up being
 ///              freed by dynstr_free().
 template <typename T1, typename... T2>
-static void free_dynamic_strings(T1 *first, T2 *... rest) {
+static void free_dynamic_strings(T1 *first, T2 *...rest) {
   free_dynamic_strings(first);
   free_dynamic_strings(rest...);
 }
@@ -7296,8 +7333,48 @@ bool match_delimiter(int c, const char *delim, size_t length) {
   return false;
 }
 
+/* This function checks whether the delimiter has already been changed
+   or if the current line changes the delimiter to '$$' */
+bool check_delimiter_change(const char *str) {
+  const char *line = str;
+  const char *delimiter_string = "delimiter";
+  char next = my_getc(cur_file->file);
+  DBUG_TRACE;
+  my_ungetc(next);
+  if (*delimiter != ';' || next != '$') {
+    return true;
+  }
+
+  int space_count = 0;
+  while (std::isspace(*(--line))) {
+    space_count++;
+  }
+  if (space_count == 0) {
+    return false;
+  }
+  delimiter_string += 7;
+  for (int i = 0; i < 9; i++) {
+    if (*delimiter_string-- != std::tolower(*line--)) {
+      return false;
+    }
+  }
+  DBUG_PRINT("Info", ("Change of delimiter detected"));
+  return true;
+}
+
 static bool end_of_query(int c) {
   return match_delimiter(c, delimiter, delimiter_length);
+}
+
+bool check_dollar_quote(int c, const char *str) {
+  if (c != '$') return false;
+  const char *line = str;
+  char next_c = my_getc(cur_file->file);
+  my_ungetc(next_c);
+  if (next_c == ' ' || next_c == '\n' || next_c == '\0') {
+    if (std::isspace(*(--line))) return true;
+  }
+  return false;
 }
 
 /*
@@ -7336,7 +7413,8 @@ static int read_line(char *buf, int size) {
     R_Q,
     R_SLASH_IN_Q,
     R_COMMENT,
-    R_LINE_START
+    R_LINE_START,
+    R_DOLLAR_QUOTED
   } state = R_LINE_START;
   DBUG_TRACE;
 
@@ -7354,9 +7432,7 @@ static int read_line(char *buf, int size) {
       my_free(cur_file->file_name);
       cur_file->file_name = nullptr;
       if (cur_file == file_stack) {
-        /* We're back at the first file, check if
-           all { have matching }
-        */
+        /* We're back at the first file, check if all { have matching } */
         if (cur_block != block_stack) die("Missing end of block");
 
         *p = 0;
@@ -7400,6 +7476,15 @@ static int read_line(char *buf, int size) {
           if (!have_slash) {
             last_quote = c;
             state = R_Q;
+          }
+        } else if (c == '$' && !have_slash && !check_delimiter_change(p)) {
+          /* Check for start of $$ quote */
+          char next = my_getc(cur_file->file);
+          if (check_dollar_quote(next, p)) {
+            state = R_DOLLAR_QUOTED;
+            *p++ = next;
+          } else {
+            my_ungetc(next);
           }
         } else if (c == '/') {
           if ((query_comment_start == 0) && (query_comment == 0))
@@ -7468,20 +7553,29 @@ static int read_line(char *buf, int size) {
            */
           *p++ = c;
           *p = 0;
-          DBUG_PRINT("exit", ("Found '}' in begining of a line at line: %d",
+          DBUG_PRINT("exit", ("Found '}' in beginning of a line at line: %d",
                               cur_file->lineno));
           return 0;
         } else if (c == '\'' || c == '"' || c == '`') {
           last_quote = c;
           state = R_Q;
+        } else if (c == '$' && !have_slash && !check_delimiter_change(p)) {
+          /* Check for start of $$ quote */
+          char next = my_getc(cur_file->file);
+          if (check_dollar_quote(next, p)) {
+            state = R_DOLLAR_QUOTED;
+            *p++ = next;
+          } else {
+            my_ungetc(next);
+          }
         } else
           state = R_NORMAL;
         break;
 
       case R_Q:
-        if (c == last_quote)
+        if (c == last_quote) {
           state = R_NORMAL;
-        else if (c == '\\')
+        } else if (c == '\\')
           state = R_SLASH_IN_Q;
         else if (query_comment)
           state = R_NORMAL;
@@ -7489,6 +7583,18 @@ static int read_line(char *buf, int size) {
 
       case R_SLASH_IN_Q:
         state = R_Q;
+        break;
+
+      case R_DOLLAR_QUOTED:
+        if (c == '$') {
+          char next = my_getc(cur_file->file);
+          if (next == '$') {
+            *p++ = next;
+            state = R_NORMAL;
+          } else {
+            my_ungetc(next);
+          }
+        }
         break;
     }
 
@@ -8700,12 +8806,21 @@ static void run_query_normal(struct st_connection *cn,
   MYSQL *mysql = &cn->mysql;
   MYSQL_RES *res = nullptr;
 
+  const char *interpolated_query = nullptr;
+  if (command->type == Q_EVAL || command->type == Q_SEND_EVAL) {
+    // If the statement is either `eval` or `send_eval`, the query is being
+    // interpolated, i.e., $variables are replaced by their values. Then pass
+    // the interpolated query to the handle_error function so that it can print
+    // it.
+    interpolated_query = query;
+  }
+
   if (flags & QUERY_SEND_FLAG) {
     /* Send the query */
     if (mysql_send_query_wrapper(&cn->mysql, query,
                                  static_cast<ulong>(query_len))) {
       handle_error(command, mysql_errno(mysql), mysql_error(mysql),
-                   mysql_sqlstate(mysql), ds);
+                   mysql_sqlstate(mysql), ds, query);
       goto end;
     }
   }
@@ -8724,7 +8839,7 @@ static void run_query_normal(struct st_connection *cn,
       /* we've failed to collect the result set */
       cn->pending = mysql_more_results(&cn->mysql);
       handle_error(command, mysql_errno(mysql), mysql_error(mysql),
-                   mysql_sqlstate(mysql), ds);
+                   mysql_sqlstate(mysql), ds, interpolated_query);
       goto end;
     }
 
@@ -8788,7 +8903,7 @@ static void run_query_normal(struct st_connection *cn,
   assert(error == -1);
 
   // If we come here the query is both executed and read successfully.
-  handle_no_error(command);
+  handle_no_error(command, interpolated_query);
   revert_properties();
 
 end:
@@ -8834,10 +8949,19 @@ static void run_query_stmt(MYSQL *mysql, struct st_command *command,
   MYSQL_RES *res = nullptr;
   int err = 0;
 
+  const char *interpolated_query = nullptr;
+  if (command->type == Q_EVAL || command->type == Q_SEND_EVAL) {
+    // If the statement is either `eval` or `send_eval`, the query is being
+    // interpolated, i.e., $variables are replaced by their values. Then pass
+    // the interpolated query to the handle_error function so that it can print
+    // it.
+    interpolated_query = query;
+  }
+
   // Prepare the query
   if (mysql_stmt_prepare(stmt, query, static_cast<ulong>(query_len))) {
     handle_error(command, mysql_stmt_errno(stmt), mysql_stmt_error(stmt),
-                 mysql_stmt_sqlstate(stmt), ds);
+                 mysql_stmt_sqlstate(stmt), ds, interpolated_query);
     goto end;
   }
 
@@ -8864,7 +8988,7 @@ static void run_query_stmt(MYSQL *mysql, struct st_command *command,
   // Execute the query
   if (mysql_stmt_execute(stmt)) {
     handle_error(command, mysql_stmt_errno(stmt), mysql_stmt_error(stmt),
-                 mysql_stmt_sqlstate(stmt), ds);
+                 mysql_stmt_sqlstate(stmt), ds, interpolated_query);
     goto end;
   }
 
@@ -8891,7 +9015,7 @@ static void run_query_stmt(MYSQL *mysql, struct st_command *command,
     // Store the result of the query if if will return any fields
     if (mysql_stmt_field_count(stmt) && mysql_stmt_store_result(stmt)) {
       handle_error(command, mysql_stmt_errno(stmt), mysql_stmt_error(stmt),
-                   mysql_stmt_sqlstate(stmt), ds);
+                   mysql_stmt_sqlstate(stmt), ds, interpolated_query);
       goto end;
     }
 
@@ -8959,12 +9083,12 @@ static void run_query_stmt(MYSQL *mysql, struct st_command *command,
   if (err > 0) {
     // We got an error from mysql_stmt_next_result, maybe expected.
     handle_error(command, mysql_stmt_errno(stmt), mysql_stmt_error(stmt),
-                 mysql_stmt_sqlstate(stmt), ds);
+                 mysql_stmt_sqlstate(stmt), ds, interpolated_query);
     goto end;
   }
 
   // If we got here the statement was both executed and read successfully.
-  handle_no_error(command);
+  handle_no_error(command, interpolated_query);
 
 end:
   if (!disable_warnings || disabled_warnings->count() ||

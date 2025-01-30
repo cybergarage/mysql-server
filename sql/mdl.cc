@@ -130,7 +130,9 @@ PSI_stage_info MDL_key::m_namespace_to_wait_state_name[NAMESPACE_END] = {
     {0, "Waiting for column statistics lock", 0, PSI_DOCUMENT_ME},
     {0, "Waiting for resource groups metadata lock", 0, PSI_DOCUMENT_ME},
     {0, "Waiting for foreign key metadata lock", 0, PSI_DOCUMENT_ME},
-    {0, "Waiting for check constraint metadata lock", 0, PSI_DOCUMENT_ME}};
+    {0, "Waiting for check constraint metadata lock", 0, PSI_DOCUMENT_ME},
+    {0, "Waiting for library metadata lock", 0, PSI_DOCUMENT_ME},
+};
 
 #ifdef HAVE_PSI_INTERFACE
 void MDL_key::init_psi_keys() {
@@ -3819,6 +3821,7 @@ bool MDL_context::upgrade_shared_lock(MDL_ticket *mdl_ticket,
   }
 
   mdl_ticket->m_type = new_type;
+  mysql_mdl_set_type(mdl_ticket->m_psi, new_type);
 
   lock->m_granted.add_ticket(mdl_ticket);
   /*
@@ -4344,6 +4347,7 @@ void MDL_ticket::downgrade_lock(enum_mdl_type new_type) {
     }
   }
   m_type = new_type;
+  mysql_mdl_set_type(m_psi, new_type);
   m_lock->m_granted.add_ticket(this);
   m_lock->reschedule_waiters();
   mysql_prlock_unlock(&m_lock->m_rwlock);

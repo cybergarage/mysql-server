@@ -256,7 +256,13 @@ st_plugin_int *remove_hton2plugin(uint slot) {
 }
 
 const char *ha_resolve_storage_engine_name(const handlerton *db_type) {
-  return db_type == nullptr ? "UNKNOWN" : hton2plugin(db_type->slot)->name.str;
+  return db_type == nullptr ||
+                 // May happen in unit tests.
+                 num_hton2plugins() == 0 ||
+                 // May happen in unit tests.
+                 hton2plugin(db_type->slot) == nullptr
+             ? "UNKNOWN"
+             : hton2plugin(db_type->slot)->name.str;
 }
 
 static handlerton *installed_htons[128];
@@ -929,6 +935,47 @@ static bool dropdb_handlerton(THD *, plugin_ref plugin, void *path) {
 
 void ha_drop_database(char *path) {
   plugin_foreach(nullptr, dropdb_handlerton, MYSQL_STORAGE_ENGINE_PLUGIN, path);
+}
+
+static bool log_ddl_drop_schema_handletron(THD *, plugin_ref plugin,
+                                           void *schema_name) {
+  handlerton *hton = plugin_data<handlerton *>(plugin);
+  if (hton->state == SHOW_OPTION_YES &&
+      (hton->log_ddl_drop_schema && hton->post_ddl && hton->is_dict_readonly)) {
+    if (hton->is_dict_readonly()) {
+      my_error(ER_READ_ONLY_MODE, MYF(0));
+      return true;
+    }
+    return hton->log_ddl_drop_schema(hton, static_cast<char *>(schema_name));
+  }
+  return false;
+}
+
+bool ha_log_ddl_drop_schema(const char *schema_name) {
+  return plugin_foreach(nullptr, log_ddl_drop_schema_handletron,
+                        MYSQL_STORAGE_ENGINE_PLUGIN,
+                        const_cast<char *>(schema_name));
+}
+
+static bool log_ddl_create_schema_handletron(THD *, plugin_ref plugin,
+                                             void *schema_name) {
+  handlerton *hton = plugin_data<handlerton *>(plugin);
+  if (hton->state == SHOW_OPTION_YES &&
+      (hton->log_ddl_create_schema && hton->post_ddl &&
+       hton->is_dict_readonly)) {
+    if (hton->is_dict_readonly()) {
+      my_error(ER_READ_ONLY_MODE, MYF(0));
+      return true;
+    }
+    return hton->log_ddl_create_schema(hton, static_cast<char *>(schema_name));
+  }
+  return false;
+}
+
+bool ha_log_ddl_create_schema(const char *schema_name) {
+  return plugin_foreach(nullptr, log_ddl_create_schema_handletron,
+                        MYSQL_STORAGE_ENGINE_PLUGIN,
+                        const_cast<char *>(schema_name));
 }
 
 static bool closecon_handlerton(THD *thd, plugin_ref plugin, void *) {
@@ -2670,6 +2717,49 @@ void HA_CREATE_INFO::init_create_options_from_share(const TABLE_SHARE *share,
     secondary_engine = share->secondary_engine;
   }
   secondary_load = share->secondary_load;
+
+  /* Copy the partitioning information that exists in the table share */
+  if (share->m_part_info != nullptr) {
+    part_info = share->m_part_info->get_clone(current_thd);
+    part_info->part_type = share->m_part_info->part_type;
+    /* copy the attribute names on which partitioning takes place */
+    part_info->list_of_part_fields = share->m_part_info->list_of_part_fields;
+    if (share->m_part_info->list_of_part_fields) {
+      part_info->part_func_string = nullptr;
+      part_info->part_field_list.clear();
+      for (auto &part_name : share->m_part_info->part_field_list) {
+        char *attr =
+            strmake_root(current_thd->mem_root, &part_name, strlen(&part_name));
+        part_info->part_field_list.push_back(attr);
+      }
+    } else {
+      // the arithmetic on part_func_string is to remove the surrounding ``
+      part_info->part_func_string = strmake_root(
+          current_thd->mem_root, share->m_part_info->part_func_string + 1,
+          share->m_part_info->part_func_len - 2);
+      part_info->part_func_len = share->m_part_info->part_func_len;
+    }
+    /* Subpartitioning-related info */
+    part_info->subpart_type = share->m_part_info->subpart_type;
+    part_info->num_subparts = share->m_part_info->num_subparts;
+    /* copy the attribute names on which subpartitioning takes place */
+    part_info->list_of_subpart_fields =
+        share->m_part_info->list_of_subpart_fields;
+    if (share->m_part_info->list_of_subpart_fields) {
+      part_info->subpart_func_string = nullptr;
+      part_info->subpart_field_list.clear();
+      for (auto &subpart_name : share->m_part_info->subpart_field_list) {
+        char *attr = strmake_root(current_thd->mem_root, &subpart_name,
+                                  strlen(&subpart_name));
+        part_info->subpart_field_list.push_back(attr);
+      }
+    } else if (share->m_part_info->subpart_func_string != nullptr) {
+      // the arithmetic on part_func_string is to remove the surrounding ``
+      part_info->subpart_func_string = strmake_root(
+          current_thd->mem_root, share->m_part_info->subpart_func_string + 1,
+          share->m_part_info->subpart_func_len - 2);
+    }
+  }
 
   if (!(used_fields & HA_CREATE_USED_AUTOEXTEND_SIZE)) {
     /* m_implicit_tablespace_autoextend_size = 0 is a valid value. Hence,
@@ -6222,6 +6312,7 @@ static bool key_uses_partial_cols(TABLE *table, uint keyno) {
                          OUT: Size of the buffer that is expected to be actually
                               used, or 0 if buffer is not needed.
   @param [in,out] flags  A combination of HA_MRR_* flags
+  @param [out] force_default_mrr Force default MRR implementation
   @param [out] cost      Estimated cost of MRR access
 
   @note
@@ -6242,12 +6333,14 @@ ha_rows handler::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
                                              void *seq_init_param,
                                              uint n_ranges_arg [[maybe_unused]],
                                              uint *bufsz, uint *flags,
+                                             bool *force_default_mrr,
                                              Cost_estimate *cost) {
   KEY_MULTI_RANGE range;
   range_seq_t seq_it;
   ha_rows rows, total_rows = 0;
   uint n_ranges = 0;
   THD *thd = current_thd;
+  *force_default_mrr = false;
 
   /* Default MRR implementation doesn't need buffer */
   *bufsz = 0;
@@ -6268,6 +6361,17 @@ ha_rows handler::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
       max_endp = range.end_key.length ? &range.end_key : nullptr;
     }
 
+    /*
+      Allow multi-valued index for DS-MRR only for equality ranges.
+      For non-equality ranges, the storage engine might need to call
+      Field_typed_array::key_cmp(), which is not safe when doing an
+      index-only scan.
+    */
+    if (!*force_default_mrr &&
+        (table->key_info[keyno].flags & HA_MULTI_VALUED_KEY) &&
+        !(range.range_flag & EQ_RANGE)) {
+      *force_default_mrr = true;
+    }
     /*
       Return HA_POS_ERROR if the specified keyno is not capable of
       serving the specified range request. The cases checked for are:
@@ -6349,8 +6453,8 @@ ha_rows handler::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
   // Cost computation.
   assert(cost->is_zero());
   if (thd->lex->using_hypergraph_optimizer()) {
-    cost->add_cpu(
-        EstimateIndexRangeScanCost(table, keyno, n_ranges, total_rows));
+    cost->add_cpu(EstimateIndexRangeScanCost(
+        table, keyno, RangeScanType::kMultiRange, n_ranges, total_rows));
   } else {
     const Cost_model_table *const cost_model = table->cost_model();
 
@@ -6969,10 +7073,12 @@ ha_rows DsMrr_impl::dsmrr_info_const(uint keyno, RANGE_SEQ_IF *seq,
   ha_rows rows;
   uint def_flags = *flags;
   uint def_bufsz = *bufsz;
+  bool force_default_mrr = false;
 
   /* Get cost/flags/mem_usage of default MRR implementation */
   rows = h->handler::multi_range_read_info_const(
-      keyno, seq, seq_init_param, n_ranges, &def_bufsz, &def_flags, cost);
+      keyno, seq, seq_init_param, n_ranges, &def_bufsz, &def_flags,
+      &force_default_mrr, cost);
   if (rows == HA_POS_ERROR) {
     /* Default implementation can't perform MRR scan => we can't either */
     return rows;
@@ -6981,10 +7087,12 @@ ha_rows DsMrr_impl::dsmrr_info_const(uint keyno, RANGE_SEQ_IF *seq,
   /*
     If HA_MRR_USE_DEFAULT_IMPL has been passed to us, that is an order to
     use the default MRR implementation (we need it for UPDATE/DELETE).
-    Otherwise, make a choice based on cost and mrr* flags of
-    @@optimizer_switch.
+    Also, if multi_range_read_info_const() detected that "DS_MRR" cannot
+    be used (E.g. Using a multi-valued index for non-equality ranges), we
+    are mandated to use the default implementation. Else, make a choice
+    based on cost and mrr* flags of @@optimizer_switch.
   */
-  if ((*flags & HA_MRR_USE_DEFAULT_IMPL) ||
+  if ((*flags & HA_MRR_USE_DEFAULT_IMPL) || force_default_mrr ||
       choose_mrr_impl(keyno, rows, flags, bufsz, cost)) {
     DBUG_PRINT("info", ("Default MRR implementation choosen"));
     *flags = def_flags;
@@ -7141,10 +7249,7 @@ bool DsMrr_impl::get_disk_sweep_mrr_cost(uint keynr, ha_rows rows, uint flags,
 
   assert(cost->is_zero());
 
-  if (n_full_steps) {
-    get_sort_and_sweep_cost(table, max_buff_entries, cost);
-    cost->multiply(n_full_steps);
-  } else {
+  if (n_full_steps == 0) {
     /*
       Adjust buffer size since only parts of the buffer will be used:
       1. Adjust record estimate for the last scan to reduce likelihood
@@ -7157,6 +7262,17 @@ bool DsMrr_impl::get_disk_sweep_mrr_cost(uint keynr, ha_rows rows, uint flags,
         max<ha_rows>(static_cast<ha_rows>(1.2 * rows_in_last_step), 100);
     *buffer_size = min<ulong>(*buffer_size,
                               static_cast<ulong>(keys_in_buffer) * elem_size);
+  }
+
+  if (h->ha_thd()->lex->using_hypergraph_optimizer()) {
+    cost->add_cpu(EstimateIndexRangeScanCost(
+        table, keynr, RangeScanType::kMultiRange, 1, rows));
+    return false;
+  }
+
+  if (n_full_steps > 0) {
+    get_sort_and_sweep_cost(table, max_buff_entries, cost);
+    cost->multiply(n_full_steps);
   }
 
   Cost_estimate last_step_cost;
@@ -7536,14 +7652,19 @@ void handler::set_end_range(const key_range *range,
 int handler::compare_key(key_range *range) {
   int cmp = -1;
   if (!range || in_range_check_pushed_down) return 0;  // No max range
-  /*
-    Virtual fields are not updated during multi-valued index read in MRR.
-    Hence key comparison is skipped for MV index.
-    TODO: Disable MRR on MV index or implement a comparison logic.
-  */
-  if (!(table->key_info[active_index].flags & HA_MULTI_VALUED_KEY)) {
-    cmp = key_cmp(range_key_part, range->key, range->length);
+
+  if ((table->key_info[active_index].flags & HA_MULTI_VALUED_KEY) &&
+      table->key_read) {
+    // For multi-valued indexes, key_cmp() needs to read the virtual column
+    // backing the index. See Field_typed_array::key_cmp(). The virtual column
+    // is not available during index-only scans (typically used by DS-MRR), so
+    // skip the end of range scan in that case, and let the SQL layer do the
+    // filtering. Assuming the scan is ascending, returning -1 (less than range)
+    // makes the scan return the row to the next layer.
+    assert(range_scan_direction == RANGE_SCAN_ASC);
+    return -1;
   }
+  cmp = key_cmp(range_key_part, range->key, range->length);
   if (!cmp) cmp = key_compare_result_on_equal;
   return cmp;
 }
@@ -8867,6 +8988,56 @@ const handlerton *SecondaryEngineHandlerton(const THD *thd) {
     return nullptr;
   }
   return thd->lex->m_sql_cmd->secondary_engine();
+}
+
+std::atomic<const char *> default_secondary_engine_name;
+
+/**
+  Retrieves the secondary engine handlerton if possible.
+
+  @param  thd       Query thd.
+  @param  secondary_engine_in_name  Name of secondary engine if available.
+
+  @retval handlerton    if secondary engine handle found.
+  @retval nullptr       if secondary engine not found.
+*/
+const handlerton *EligibleSecondaryEngineHandlerton(
+    THD *thd, const LEX_CSTRING *secondary_engine_in_name) {
+  // 1st priority - retrieve handlerton cached already in thd.
+  const handlerton *secondary_engine =
+      thd->eligible_secondary_engine_handlerton();
+  if (secondary_engine == nullptr) {
+    // 2nd priority, if secondary engine name provided, then try to
+    // use that  to retrieve handlerton.
+    const LEX_CSTRING *secondary_engine_name = secondary_engine_in_name;
+    LEX_CSTRING cur_name;
+
+    if (secondary_engine_name == nullptr &&
+        default_secondary_engine_name != nullptr) {
+      /** 3rd priority - if no secondary secondary_engine_in_name provided,
+       * attempt to retrieve secondary engine name via
+       * default_secondary_engine_name, if available. */
+      cur_name = to_lex_cstring(default_secondary_engine_name);
+      secondary_engine_name = &cur_name;
+    } else if (secondary_engine_name == nullptr && (thd->lex != nullptr) &&
+               (thd->lex->m_sql_cmd != nullptr)) {
+      /** 4th priority - attempt to retrieve secondary engine name through
+       * eligible_secondary_storage_engine function */
+      secondary_engine_name =
+          thd->lex->m_sql_cmd->eligible_secondary_storage_engine(thd);
+    }
+    /* if secondary_engine_name found via 2,3 or 4th priority lookups, use the
+     * name to retrieve the handlerton */
+    if (secondary_engine_name != nullptr) {
+      plugin_ref ref = ha_resolve_by_name(thd, secondary_engine_name, false);
+      if (ref != nullptr) {
+        thd->set_eligible_secondary_engine_handlerton(
+            plugin_data<handlerton *>(ref));
+        secondary_engine = thd->eligible_secondary_engine_handlerton();
+      }
+    }
+  }
+  return secondary_engine;
 }
 
 /**

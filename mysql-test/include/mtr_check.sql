@@ -211,9 +211,17 @@ BEGIN
   -- not give consistent result either.
   --
   SELECT /*+SET_VAR(use_secondary_engine=OFF)*/ USER, HOST, DB, COMMAND, INFO FROM INFORMATION_SCHEMA.PROCESSLIST
-    WHERE COMMAND NOT IN ('Sleep', 'Daemon')
+    WHERE COMMAND NOT IN ('Sleep', 'Daemon', 'Killed')
       AND USER NOT IN ('unauthenticated user','mysql.session', 'event_scheduler')
         ORDER BY COMMAND;
+
+  -- Ensure that libraries are all dropped at the end of test-runs.
+  SELECT * FROM INFORMATION_SCHEMA.LIBRARIES
+  ORDER BY LIBRARY_CATALOG, LIBRARY_SCHEMA, LIBRARY_NAME;
+  -- Ensure that stored program imports are also cleared at the end of test-runs.
+  # BUG#37382579 The SELECT * FROM INFORMATION_SCHEMA.ROUTINE_LIBRARIES fails when a queried from the hypergraph.
+  # SELECT * FROM INFORMATION_SCHEMA.ROUTINE_LIBRARIES
+  # ORDER BY ROUTINE_CATALOG, ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE, LIBRARY_CATALOG, LIBRARY_SCHEMA, LIBRARY_NAME, LIBRARY_VERSION;
 
   -- Checksum system tables to make sure they have been properly
   -- restored after test.

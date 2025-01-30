@@ -697,21 +697,23 @@ bool net_send_error(NET *net, uint sql_errno, const char *err) {
       <td>status_flags</td>
       <td>@ref SERVER_STATUS_flags_enum</td></tr>
   <tr><td colspan="3">}</td></tr>
-  <tr><td colspan="3">if capabilities @& ::CLIENT_SESSION_TRACK</td></tr>
+  <tr><td colspan="3">if capabilities @& ::CLIENT_SESSION_TRACK {</td></tr>
+  <tr><td colspan="3">if (status_flags @& ::SERVER_SESSION_STATE_CHANGED) OR (status is not empty) {</td></tr>
   <tr><td>@ref sect_protocol_basic_dt_string_le "string&lt;lenenc&gt;"</td>
       <td>info</td>
       <td>human readable status information</td></tr>
+  <tr><td colspan="3">} -- if (status_flags @& ::SERVER_SESSION_STATE_CHANGED) OR (s... </td></tr>
   <tr><td colspan="3">  if status_flags @& ::SERVER_SESSION_STATE_CHANGED {</td></tr>
   <tr><td>@ref sect_protocol_basic_dt_string_le "string&lt;lenenc&gt;"</td>
       <td>session state info</td>
       <td>@anchor a_protocol_basic_ok_packet_sessinfo
           @ref sect_protocol_basic_ok_packet_sessinfo</td></tr>
-  <tr><td colspan="3">  }</td></tr>
-  <tr><td colspan="3">} else {</td></tr>
+  <tr><td colspan="3">  } if status_flags @& ::SERVER_SESSION_STATE_CHANGED</td></tr>
+  <tr><td colspan="3">} else { -- if capabilities @& ::CLIENT_SESSION_TRACK </td></tr>
   <tr><td>@ref sect_protocol_basic_dt_string_eof "string&lt;EOF&gt;"</td>
       <td>info</td>
       <td>human readable status information</td></tr>
-  <tr><td colspan="3">}</td></tr>
+  <tr><td colspan="3">} -- if capabilities @& ::CLIENT_SESSION_TRACK </td></tr>
   </table>
 
   These rules distinguish whether the packet represents OK or EOF:
@@ -1383,6 +1385,7 @@ uchar Protocol_classic::get_error() { return m_thd->net.error; }
 
 void Protocol_classic::wipe_net() {
   memset(&m_thd->net, 0, sizeof(m_thd->net));
+  m_thd->store_cached_properties(THD::cached_properties::RW_STATUS);
 }
 
 void Protocol_classic::set_max_packet_size(ulong max_packet_size) {
@@ -2266,7 +2269,7 @@ int Protocol_classic::read_packet() {
 
   @section sect_protocol_binary_resultset_row_value Binary Protocol Value
 
-  @subsection sect_protocol_binary_resultset_row_value_string ProtocolBinary::MYSQL_TYPE_STRING, ProtocolBinary::MYSQL_TYPE_VARCHAR, ProtocolBinary::MYSQL_TYPE_VAR_STRING, ProtocolBinary::MYSQL_TYPE_ENUM, ProtocolBinary::MYSQL_TYPE_SET, ProtocolBinary::MYSQL_TYPE_LONG_BLOB, ProtocolBinary::MYSQL_TYPE_MEDIUM_BLOB, ProtocolBinary::MYSQL_TYPE_BLOB, ProtocolBinary::MYSQL_TYPE_TINY_BLOB, ProtocolBinary::MYSQL_TYPE_GEOMETRY, ProtocolBinary::MYSQL_TYPE_BIT, ProtocolBinary::MYSQL_TYPE_DECIMAL, ProtocolBinary::MYSQL_TYPE_NEWDECIMAL:
+  @subsection sect_protocol_binary_resultset_row_value_string ProtocolBinary::MYSQL_TYPE_STRING, ProtocolBinary::MYSQL_TYPE_VARCHAR, ProtocolBinary::MYSQL_TYPE_VAR_STRING, ProtocolBinary::MYSQL_TYPE_ENUM, ProtocolBinary::MYSQL_TYPE_SET, ProtocolBinary::MYSQL_TYPE_LONG_BLOB, ProtocolBinary::MYSQL_TYPE_MEDIUM_BLOB, ProtocolBinary::MYSQL_TYPE_BLOB, ProtocolBinary::MYSQL_TYPE_TINY_BLOB, ProtocolBinary::MYSQL_TYPE_GEOMETRY, ProtocolBinary::MYSQL_TYPE_BIT, ProtocolBinary::MYSQL_TYPE_DECIMAL, ProtocolBinary::MYSQL_TYPE_NEWDECIMAL, ProtocolBinary::MYSQL_TYPE_JSON
 
   <table>
   <caption>::MYSQL_TYPE_STRING</caption>
@@ -2554,7 +2557,7 @@ MY_COMPILER_CLANG_WORKAROUND_REF_DOCBUG()
   <tr><th>Type</th><th>Name</th><th>Description</th></tr>
   <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
       <td>status</td>
-      <td>[0x19] COM_STMT_CLOSE</td></tr>
+      <td>[0x1C] COM_STMT_FETCH</td></tr>
   <tr><td>@ref a_protocol_type_int4 "int&lt;4&gt;"</td>
       <td>statement_id</td>
       <td>ID of the prepared statement to close</td></tr>

@@ -41,6 +41,7 @@
 #define HAVE_PSI_THREAD_INTERFACE
 #define HAVE_PSI_TRANSACTION_INTERFACE
 #define HAVE_PSI_TLS_CHANNEL_INTERFACE
+#define HAVE_PSI_SERVER_TELEMETRY_LOGS_INTERFACE
 
 #include "storage/perfschema/pfs.h"
 
@@ -52,6 +53,8 @@
 #include <mysql/components/component_implementation.h>
 #include <mysql/components/service.h>
 #include <mysql/components/service_implementation.h>
+#include <mysql/components/services/mysql_server_telemetry_logs_client_service.h>
+#include <mysql/components/services/mysql_server_telemetry_logs_service.h>
 #include <mysql/components/services/mysql_server_telemetry_metrics_service.h>
 #include <mysql/components/services/mysql_server_telemetry_traces_service.h>
 #include <mysql/components/services/pfs_notification.h>
@@ -109,6 +112,8 @@
 #include "sql/sql_const.h"
 #include "sql/sql_digest.h"
 #include "sql/sql_error.h"
+#include "storage/perfschema/mysql_server_telemetry_logs_client_service_imp.h"
+#include "storage/perfschema/mysql_server_telemetry_logs_service_imp.h"
 #include "storage/perfschema/mysql_server_telemetry_traces_service_imp.h"
 #include "storage/perfschema/pfs_account.h"
 #include "storage/perfschema/pfs_column_values.h"
@@ -164,6 +169,7 @@
 #define DISABLE_PSI_TRANSACTION
 #define DISABLE_PSI_TLS_CHANNEL
 #define DISABLE_PSI_SERVER_TELEMETRY_TRACES
+#define DISABLE_PSI_SERVER_TELEMETRY_LOGS
 #endif /* IN_DOXYGEN */
 
 static constexpr uint STATE_FLAG_STATEMENT_TELEMETRY =
@@ -7486,6 +7492,8 @@ static inline enum_object_type sp_type_to_object_type(uint sp_type) {
       return OBJECT_TYPE_FUNCTION;
     case enum_sp_type::PROCEDURE:
       return OBJECT_TYPE_PROCEDURE;
+    case enum_sp_type::LIBRARY:
+      return OBJECT_TYPE_LIBRARY;
     case enum_sp_type::TRIGGER:
       return OBJECT_TYPE_TRIGGER;
     case enum_sp_type::EVENT:
@@ -8808,6 +8816,13 @@ void pfs_set_metadata_lock_duration_vc(PSI_metadata_lock *lock,
   pfs->m_mdl_duration = mdl_duration;
 }
 
+void pfs_set_metadata_lock_type_vc(PSI_metadata_lock *lock,
+                                   opaque_mdl_type mdl_type) {
+  auto *pfs = reinterpret_cast<PFS_metadata_lock *>(lock);
+  assert(pfs != nullptr);
+  pfs->m_mdl_type = mdl_type;
+}
+
 void pfs_destroy_metadata_lock_vc(PSI_metadata_lock *lock) {
   auto *pfs = reinterpret_cast<PFS_metadata_lock *>(lock);
   assert(pfs != nullptr);
@@ -9505,6 +9520,13 @@ PSI_mdl_service_v2 pfs_mdl_service_v2 = {
     pfs_set_metadata_lock_duration_vc, pfs_destroy_metadata_lock_vc,
     pfs_start_metadata_wait_vc,        pfs_end_metadata_wait_vc};
 
+PSI_mdl_service_v3 pfs_mdl_service_v3 = {
+    /* Old interface, for plugins. */
+    pfs_create_metadata_lock_vc,       pfs_set_metadata_lock_status_vc,
+    pfs_set_metadata_lock_duration_vc, pfs_set_metadata_lock_type_vc,
+    pfs_destroy_metadata_lock_vc,      pfs_start_metadata_wait_vc,
+    pfs_end_metadata_wait_vc};
+
 SERVICE_TYPE(psi_mdl_v1)
 SERVICE_IMPLEMENTATION(performance_schema, psi_mdl_v1) = {
     /* New interface, for components. */
@@ -9518,6 +9540,14 @@ SERVICE_IMPLEMENTATION(performance_schema, psi_mdl_v2) = {
     pfs_create_metadata_lock_vc,       pfs_set_metadata_lock_status_vc,
     pfs_set_metadata_lock_duration_vc, pfs_destroy_metadata_lock_vc,
     pfs_start_metadata_wait_vc,        pfs_end_metadata_wait_vc};
+
+SERVICE_TYPE(psi_mdl_v3)
+SERVICE_IMPLEMENTATION(performance_schema, psi_mdl_v3) = {
+    /* New interface, for components. */
+    pfs_create_metadata_lock_vc,       pfs_set_metadata_lock_status_vc,
+    pfs_set_metadata_lock_duration_vc, pfs_set_metadata_lock_type_vc,
+    pfs_destroy_metadata_lock_vc,      pfs_start_metadata_wait_vc,
+    pfs_end_metadata_wait_vc};
 
 PSI_idle_service_v1 pfs_idle_service_v1 = {
     /* Old interface, for plugins. */
@@ -9683,10 +9713,16 @@ PSI_data_lock_service_v1 pfs_data_lock_service_v1 = {
 PSI_tls_channel_service_v1 pfs_tls_channel_service_v1 = {
     pfs_register_tls_channel_v1, pfs_unregister_tls_channel_v1};
 
+#ifdef HAVE_PSI_METRICS_INTERFACE
 PSI_metric_service_v1 pfs_metric_service_v1 = {
     pfs_register_meters_v1, pfs_unregister_meters_v1,
     pfs_register_change_notification_v1, pfs_unregister_change_notification_v1,
     pfs_send_change_notification_v1};
+#endif
+
+PSI_logs_client_service_v1 pfs_logs_client_service_v1 = {
+    pfs_register_logger_client_v1, pfs_unregister_logger_client_v1,
+    pfs_check_enabled_v1, pfs_log_emit_v1};
 
 static void *get_system_interface(int version) {
   switch (version) {
@@ -9780,6 +9816,8 @@ static void *get_mdl_interface(int version) {
       return &pfs_mdl_service_v1;
     case PSI_MDL_VERSION_2:
       return &pfs_mdl_service_v2;
+    case PSI_MDL_VERSION_3:
+      return &pfs_mdl_service_v3;
     default:
       return nullptr;
   }
@@ -9899,8 +9937,19 @@ static void *get_tls_channel_interface(int version) {
 
 static void *get_metric_interface(int version) {
   switch (version) {
+#ifdef HAVE_PSI_METRICS_INTERFACE
     case PSI_METRIC_VERSION_1:
       return &pfs_metric_service_v1;
+#endif
+    default:
+      return nullptr;
+  }
+}
+
+static void *get_logs_client_interface(int version) {
+  switch (version) {
+    case PSI_LOGGER_CLIENT_VERSION_1:
+      return &pfs_logs_client_service_v1;
     default:
       return nullptr;
   }
@@ -9948,6 +9997,9 @@ struct PSI_tls_channel_bootstrap pfs_tls_channel_bootstrap = {
 
 struct PSI_metric_bootstrap pfs_metric_bootstrap = {get_metric_interface};
 
+struct PSI_logs_client_bootstrap pfs_logs_client_bootstrap = {
+    get_logs_client_interface};
+
 struct PSI_transaction_bootstrap pfs_transaction_bootstrap = {
     get_transaction_interface};
 
@@ -9968,9 +10020,11 @@ static void *services[] = {
     REFERENCES_SERVICE(performance_schema, psi_error_v1),
     REFERENCES_SERVICE(performance_schema, psi_file_v2),
     REFERENCES_SERVICE(performance_schema, psi_idle_v1),
-    /* Deprecated, use psi_mdl_v2. */
+    /* Deprecated, use psi_mdl_v3. */
     REFERENCES_SERVICE(performance_schema, psi_mdl_v1),
+    /* Deprecated, use psi_mdl_v3. */
     REFERENCES_SERVICE(performance_schema, psi_mdl_v2),
+    REFERENCES_SERVICE(performance_schema, psi_mdl_v3),
     REFERENCES_SERVICE(performance_schema, psi_memory_v2),
     REFERENCES_SERVICE(performance_schema, psi_mutex_v1),
     REFERENCES_SERVICE(performance_schema, psi_rwlock_v2),
@@ -10006,6 +10060,8 @@ static void *services[] = {
     REFERENCES_SERVICE(performance_schema, psi_tls_channel_v1),
     REFERENCES_SERVICE(performance_schema, mysql_server_telemetry_traces_v1),
     REFERENCES_SERVICE(performance_schema, mysql_server_telemetry_metrics_v1),
+    REFERENCES_SERVICE(performance_schema, mysql_server_telemetry_logs),
+    REFERENCES_SERVICE(performance_schema, mysql_server_telemetry_logs_client),
     REFERENCES_SERVICE(performance_schema, psi_metric_v1),
     REFERENCES_SERVICE(performance_schema, pfs_plugin_column_text_v1),
     REFERENCES_SERVICE(mysql_server, pfs_notification_v3),

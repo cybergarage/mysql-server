@@ -119,6 +119,11 @@ DEFINE_BOOL_METHOD(mysql_thd_attributes_imp::get,
           val.length = strlen(t->charset()->csname);
         }
         *((mysql_cstring_with_length *)inout_pvalue) = val;
+      } else if (!strcmp(name, "collation_connection_charset")) {
+        auto collation_charset = t->variables.collation_connection->csname;
+        auto val = mysql_cstring_with_length{collation_charset,
+                                             strlen(collation_charset)};
+        *((mysql_cstring_with_length *)inout_pvalue) = val;
       } else if (!strcmp(name, "sql_command")) {
         const char *sql_command = get_sql_command_string(t->lex->sql_command);
         if (t->lex->sql_command == SQLCOM_END &&
@@ -166,9 +171,24 @@ DEFINE_BOOL_METHOD(mysql_thd_attributes_imp::get,
 }
 
 DEFINE_BOOL_METHOD(mysql_thd_attributes_imp::set,
-                   (MYSQL_THD thd [[maybe_unused]],
-                    const char *name [[maybe_unused]],
-                    void *inout_pvalue [[maybe_unused]])) {
+                   (MYSQL_THD thd, const char *name, void *inout_pvalue)) {
+  try {
+    if (inout_pvalue) {
+      THD *t = static_cast<THD *>(thd);
+      if (t == nullptr) t = current_thd;
+      if (t == nullptr) return true;
+      if (!strcmp(name, "da_status")) {
+        auto status = *((uint16_t *)inout_pvalue);
+        if (status == STATUS_DA_EMPTY) {
+          t->get_stmt_da()->reset_diagnostics_area();
+          t->get_stmt_da()->reset_condition_info(t);
+        }
+      }
+      return false;
+    }
+  } catch (...) {
+    mysql_components_handle_std_exception(__func__);
+  }
   return true;
 }
 

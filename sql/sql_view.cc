@@ -78,7 +78,7 @@
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
 #include "sql/sql_parse.h"  // create_default_definer
-#include "sql/sql_show.h"   // append_identifier
+#include "sql/sql_show.h"   // append_identifier_*
 #include "sql/sql_table.h"  // write_bin_log
 #include "sql/strfunc.h"
 #include "sql/system_variables.h"
@@ -448,7 +448,9 @@ bool mysql_create_view(THD *thd, Table_ref *views, enum_view_create_mode mode) {
   Query_block *sl;
   Query_expression *const unit = lex->unit;
   bool res = false;
-  bool exists = false;
+  bool schema_exists = false;
+  bool use_existing_view = false;
+
   DBUG_TRACE;
   dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
 
@@ -500,10 +502,10 @@ bool mysql_create_view(THD *thd, Table_ref *views, enum_view_create_mode mode) {
     Checking the existence of the database in which the view is to be created.
     Errors will be reported in dd::schema_exists().
   */
-  if (dd::schema_exists(thd, view->db, &exists)) {
+  if (dd::schema_exists(thd, view->db, &schema_exists)) {
     res = true;
     goto err;
-  } else if (!exists) {
+  } else if (!schema_exists) {
     my_error(ER_BAD_DB_ERROR, MYF(0), view->db);
     res = true;
     goto err;
@@ -666,17 +668,18 @@ bool mysql_create_view(THD *thd, Table_ref *views, enum_view_create_mode mode) {
     }
   }
 
-  if ((res = mysql_register_view(thd, view, mode))) goto err_with_rollback;
+  if ((res = mysql_register_view(thd, view, mode, &use_existing_view)))
+    goto err_with_rollback;
 
-  /*
-    View TABLE_SHARE must be removed from the table definition cache in order
-    to make ALTER VIEW work properly. Otherwise, we would not be able to
-    detect meta-data changes after ALTER VIEW.
-  */
-  tdc_remove_table(thd, TDC_RT_REMOVE_ALL, view->db, view->table_name, false);
+  if (!use_existing_view) {
+    /*
+      View TABLE_SHARE must be removed from the table definition cache in order
+      to make ALTER VIEW work properly. Otherwise, we would not be able to
+      detect meta-data changes after ALTER VIEW.
+    */
+    tdc_remove_table(thd, TDC_RT_REMOVE_ALL, view->db, view->table_name, false);
 
-  // Update metadata of views referencing "view".
-  {
+    // Update metadata of views referencing "view".
     Uncommitted_tables_guard uncommited_tables(thd);
     uncommited_tables.add_table(view);
     if ((res = update_referencing_views_metadata(thd, view, false,
@@ -696,6 +699,12 @@ bool mysql_create_view(THD *thd, Table_ref *views, enum_view_create_mode mode) {
                 command[static_cast<int>(thd->lex->create_view_mode)].length);
     view_store_options(thd, views, &buff);
     buff.append(STRING_WITH_LEN("VIEW "));
+
+    if ((mode == enum_view_create_mode::VIEW_CREATE_NEW) &&
+        (lex->create_info->options & HA_LEX_CREATE_IF_NOT_EXISTS)) {
+      buff.append(STRING_WITH_LEN("IF NOT EXISTS "));
+    }
+
     /* Test if user supplied a db (ie: we did not use thd->db) */
     if (views->db && views->db[0] &&
         (thd->db().str == nullptr || strcmp(views->db, thd->db().str))) {
@@ -716,8 +725,10 @@ bool mysql_create_view(THD *thd, Table_ref *views, enum_view_create_mode mode) {
 
     int errcode = query_error_code(thd, true);
     thd->add_to_binlog_accessed_dbs(views->db);
-    if ((res = thd->binlog_query(THD::STMT_QUERY_TYPE, buff.ptr(),
-                                 buff.length(), true, false, false, errcode)))
+
+    if ((res =
+             thd->binlog_query(THD::STMT_QUERY_TYPE, buff.ptr(), buff.length(),
+                               !use_existing_view, false, false, errcode)))
       goto err_with_rollback;
   }
 
@@ -725,6 +736,13 @@ bool mysql_create_view(THD *thd, Table_ref *views, enum_view_create_mode mode) {
   res = DBUG_EVALUATE_IF("simulate_create_view_failure", true, false) ||
         trans_commit_stmt(thd) || trans_commit(thd);
   if (res) goto err_with_rollback;
+
+  if (use_existing_view) {
+    // This is a CREATE VIEW IF NOT EXISTS statement dealing with
+    // an existing view.
+    push_warning_printf(thd, Sql_condition::SL_NOTE, ER_TABLE_EXISTS_ERROR,
+                        ER_THD(thd, ER_TABLE_EXISTS_ERROR), views->table_name);
+  }
 
   my_ok(thd);
   lex->link_first_table_back(view, link_to_local);
@@ -825,11 +843,13 @@ bool is_updatable_view(THD *thd, Table_ref *view) {
 /**
   Register view by writing its definition to the data-dictionary.
 
-  @param  thd                 Thread handler.
-  @param  view                View description
-  @param  mode                VIEW_CREATE_NEW, VIEW_ALTER or
-                              VIEW_CREATE_OR_REPLACE.
-
+  @param      thd                Thread handler.
+  @param      view               View description
+  @param      mode               VIEW_CREATE_NEW, VIEW_ALTER or
+                                 VIEW_CREATE_OR_REPLACE.
+  @param[out] use_existing_view  Set to true when IF NOT EXISTS clause used
+                                 to create a new view, but a view/table with
+                                 the same name already exists in the schema.
   @note The caller must rollback both statement and transaction on failure,
         before any further accesses to DD. This is because such a failure
         might be caused by a deadlock, which requires rollback before any
@@ -840,8 +860,8 @@ bool is_updatable_view(THD *thd, Table_ref *view) {
   @retval true    Error
 */
 
-bool mysql_register_view(THD *thd, Table_ref *view,
-                         enum_view_create_mode mode) {
+bool mysql_register_view(THD *thd, Table_ref *view, enum_view_create_mode mode,
+                         bool *use_existing_view) {
   /*
     View definition query -- a SELECT statement that fully defines view. It
     is generated from the Item-tree built from the original (specified by
@@ -875,6 +895,7 @@ bool mysql_register_view(THD *thd, Table_ref *view,
 
   DBUG_TRACE;
 
+  *use_existing_view = false;
   /*
     A view can be merged if it is technically possible and if the user didn't
     ask that we create a temporary table instead.
@@ -940,22 +961,26 @@ bool mysql_register_view(THD *thd, Table_ref *view,
 
   if (at != nullptr) {
     if (mode == enum_view_create_mode::VIEW_CREATE_NEW) {
-      my_error(ER_TABLE_EXISTS_ERROR, MYF(0), view->alias);
-      return true;
+      *use_existing_view =
+          lex->create_info->options & HA_LEX_CREATE_IF_NOT_EXISTS;
+      if (!*use_existing_view) {
+        my_error(ER_TABLE_EXISTS_ERROR, MYF(0), view->alias);
+        return true;
+      }
+    } else {
+      if (at->type() != dd::enum_table_type::USER_VIEW &&
+          at->type() != dd::enum_table_type::SYSTEM_VIEW) {
+        my_error(ER_WRONG_OBJECT, MYF(0), view->db, view->table_name, "VIEW");
+        return true;
+      }
+
+      update_view = true;
+
+      /*
+        TODO: read dependence list, too, to process cascade/restrict
+        TODO: special cascade/restrict procedure for alter?
+      */
     }
-
-    if (at->type() != dd::enum_table_type::USER_VIEW &&
-        at->type() != dd::enum_table_type::SYSTEM_VIEW) {
-      my_error(ER_WRONG_OBJECT, MYF(0), view->db, view->table_name, "VIEW");
-      return true;
-    }
-
-    update_view = true;
-
-    /*
-      TODO: read dependence list, too, to process cascade/restrict
-      TODO: special cascade/restrict procedure for alter?
-    */
   } else {
     if (mode == enum_view_create_mode::VIEW_ALTER) {
       my_error(ER_NO_SUCH_TABLE, MYF(0), view->db, view->alias);
@@ -1007,6 +1032,13 @@ bool mysql_register_view(THD *thd, Table_ref *view,
   if (view->with_check != VIEW_CHECK_NONE && !view->updatable_view) {
     my_error(ER_VIEW_NONUPD_CHECK, MYF(0), view->db, view->table_name);
     return true;
+  }
+
+  if (*use_existing_view) {
+    // This is a CREATE VIEW IF NOT EXISTS statement dealing with
+    // an existing view, so there's no need to do anything more
+    // here.
+    return false;
   }
 
   // It is either ALTER or CREATE OR REPLACE of an existing view.
@@ -1749,8 +1781,11 @@ bool mysql_drop_view(THD *thd, Table_ref *views) {
   dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
   Security_context *sctx = thd->security_context();
 
-  // First check which views exist
   String non_existant_views;
+  bool view_does_not_exist = false;
+  bool base_table_with_same_name_exists = false;
+
+  // First check which views exist
   for (Table_ref *view = views; view; view = view->next_local) {
     /*
       Either, the entity does not exist, in which case we will
@@ -1763,7 +1798,16 @@ bool mysql_drop_view(THD *thd, Table_ref *views) {
     const dd::Abstract_table *at = nullptr;
     if (thd->dd_client()->acquire(view->db, view->table_name, &at)) return true;
 
-    if (at == nullptr) {
+    view_does_not_exist = (at == nullptr);
+    base_table_with_same_name_exists =
+        (at && (at->type() == dd::enum_table_type::BASE_TABLE));
+
+    /*
+      If DROP ... IF EXISTS is specified, then reporting a warning will
+      suffice when the view does not exist or when a base table with the same
+      name exists. Otherwise, report an appropriate error.
+    */
+    if (view_does_not_exist) {
       String tbl_name(view->db, system_charset_info);
       tbl_name.append('.');
       tbl_name.append(String(view->table_name, system_charset_info));
@@ -1775,9 +1819,15 @@ bool mysql_drop_view(THD *thd, Table_ref *views) {
         if (non_existant_views.length()) non_existant_views.append(',');
         non_existant_views.append(tbl_name);
       }
-    } else if (at->type() == dd::enum_table_type::BASE_TABLE) {
-      my_error(ER_WRONG_OBJECT, MYF(0), view->db, view->table_name, "VIEW");
-      return true;
+    } else if (base_table_with_same_name_exists) {
+      if (thd->lex->drop_if_exists)
+        push_warning_printf(thd, Sql_condition::SL_NOTE, ER_WRONG_OBJECT,
+                            ER_THD(thd, ER_WRONG_OBJECT), view->db,
+                            view->table_name, "VIEW");
+      else {
+        my_error(ER_WRONG_OBJECT, MYF(0), view->db, view->table_name, "VIEW");
+        return true;
+      }
     }
   }
   if (non_existant_views.length()) {
@@ -1807,7 +1857,11 @@ bool mysql_drop_view(THD *thd, Table_ref *views) {
       return true;
     }
 
-    if (at == nullptr) {
+    view_does_not_exist = (at == nullptr);
+    base_table_with_same_name_exists =
+        (at && (at->type() == dd::enum_table_type::BASE_TABLE));
+
+    if (view_does_not_exist || base_table_with_same_name_exists) {
       assert(thd->lex->drop_if_exists);
       continue;  // Warning reported above.
     }

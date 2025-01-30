@@ -42,15 +42,6 @@ ENDIF()
 
 IF(EXISTS "/etc/fedora-release")
   SET(LINUX_FEDORA 1)
-  FILE(READ "/etc/fedora-release" FEDORA_RELEASE)
-  IF(FEDORA_RELEASE MATCHES "Fedora" AND
-      FEDORA_RELEASE MATCHES "28")
-    SET(LINUX_FEDORA_28 1)
-  ENDIF()
-  IF(FEDORA_RELEASE MATCHES "Fedora" AND
-      FEDORA_RELEASE MATCHES "34")
-    SET(LINUX_FEDORA_34 1)
-  ENDIF()
 ENDIF()
 
 # Use dpkg-buildflags --get CPPFLAGS | CFLAGS | CXXFLAGS | LDFLAGS
@@ -65,7 +56,7 @@ IF(LINUX_FEDORA OR LINUX_RHEL OR LINUX_SUSE)
   SET(LINUX_RPM_PLATFORM 1)
 ENDIF()
 
-# We require at least GCC 10 Clang 12
+# We require at least GCC 10 Clang 14
 IF(NOT FORCE_UNSUPPORTED_COMPILER)
   IF(MY_COMPILER_IS_GNU)
     # gcc9 is known to fail
@@ -74,8 +65,8 @@ IF(NOT FORCE_UNSUPPORTED_COMPILER)
     ENDIF()
   ELSEIF(MY_COMPILER_IS_CLANG)
     # This is the lowest version tested
-    IF(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
-      MESSAGE(FATAL_ERROR "Clang 12 or newer is required!")
+    IF(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14)
+      MESSAGE(FATAL_ERROR "Clang 14 or newer is required!")
     ENDIF()
   ELSE()
     MESSAGE(FATAL_ERROR "Unsupported compiler!")

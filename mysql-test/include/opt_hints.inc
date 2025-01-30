@@ -459,7 +459,9 @@ CREATE TABLE t1
   INDEX idx1(f2, f3), INDEX idx2(f3)
 );
 
-INSERT INTO t1(f1) VALUES (1), (2), (3), (4), (5), (6), (7), (8);
+INSERT INTO t1(f1) WITH RECURSIVE qn(n) AS
+(SELECT 0 UNION ALL SELECT n+1 FROM qn WHERE n<99) SELECT n FROM qn;
+
 INSERT INTO t1(f2, f3) VALUES (3,4), (3,4);
 ANALYZE TABLE t1;
 
@@ -1241,3 +1243,29 @@ SELECT REGEXP_SUBSTR(trace, 'index_dive[^,]*',1,1,'n') FROM
 
 SET SESSION OPTIMIZER_TRACE="enabled=off";
 DROP TABLE t;
+
+--echo # Statement modifiers for SELECT which affect temporary table creation
+CREATE TABLE t1 (
+    f1 int unsigned NOT NULL auto_increment primary key,
+    f2 varchar(100) NOT NULL default ''
+);
+CREATE TABLE t2 (
+    f1 varchar(10) NOT NULL default '',
+    f2 char(3) NOT NULL default '',
+    PRIMARY KEY  (`f1`),
+    KEY `k1` (`f2`,`f1`)
+);
+INSERT INTO t1 values(NULL, '');
+INSERT INTO t2 VALUES ('486878','WDT'),('486910','WDT');
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT avg(t2.f1) FROM t1, t2 where t2.f2 = 'SIR' GROUP BY t1.f1;
+
+--echo # SELECT SQL_BUFFER_RESULT should use temporary table
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT SQL_BUFFER_RESULT avg(t2.f1) FROM t1, t2 where t2.f2 = 'SIR' GROUP BY t1.f1;
+
+--echo # SELECT SQL_BIG_RESULT should not use temporary table
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT SQL_BIG_RESULT avg(t2.f1) FROM t1, t2 where t2.f2 = 'SIR' GROUP BY t1.f1;
+
+DROP TABLE t1, t2;

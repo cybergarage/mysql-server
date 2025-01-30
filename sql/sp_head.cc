@@ -90,7 +90,7 @@
 #include "sql/sql_error.h"
 #include "sql/sql_parse.h"  // cleanup_items
 #include "sql/sql_profile.h"
-#include "sql/sql_show.h"  // append_identifier
+#include "sql/sql_show.h"  // append_identifier_*
 #include "sql/thd_raii.h"
 #include "sql/thr_malloc.h"
 #include "sql/transaction.h"  // trans_commit_stmt
@@ -190,7 +190,7 @@ proc_param).
 
   - #Table_trigger_dispatcher::create_trigger()
 
-  - #Table_trigger_dispatcher::check_n_load()
+  - #dd::load_triggers()
 
   See the C++ class #Table_trigger_dispatcher in general.
 
@@ -1908,7 +1908,11 @@ sp_head::~sp_head() {
 
   for (uint ip = 0; (i = get_instr(ip)) != nullptr; ip++) ::destroy_at(i);
 
-  ::destroy_at(m_root_parsing_ctx);
+  // The libraries do not have parsing context.
+  if (m_type == enum_sp_type::LIBRARY)
+    assert(m_root_parsing_ctx == nullptr);
+  else
+    ::destroy_at(m_root_parsing_ctx);
 
   /*
     If we have non-empty LEX stack then we just came out of parser with
@@ -2428,7 +2432,7 @@ bool sp_head::execute_external_routine_core(THD *thd) {
   my_service<SERVICE_TYPE(external_program_execution)> service(
       "external_program_execution", srv_registry);
 
-  if ((err_status = init_external_routine(service))) return err_status;
+  if ((err_status = init_external_routine(&service))) return err_status;
 
   Diagnostics_area *caller_da = thd->get_stmt_da();
   Diagnostics_area sp_da(false);
@@ -2713,23 +2717,23 @@ bool sp_head::set_external_program_handle(external_program_handle sp) {
 }
 
 bool sp_head::init_external_routine(
-    my_service<SERVICE_TYPE(external_program_execution)> &service) {
+    my_service<SERVICE_TYPE(external_program_execution)> *service) {
   assert(!is_sql());
 
-  if (!service.is_valid()) {
+  if (!service->is_valid()) {
     my_error(ER_LANGUAGE_COMPONENT_NOT_AVAILABLE, MYF(0));
     return true;
   }
 
   if (m_language_stored_program == nullptr) {
-    if (service->init(reinterpret_cast<stored_program_handle>(this), nullptr,
-                      &m_language_stored_program)) {
+    if ((*service)->init(reinterpret_cast<stored_program_handle>(this), nullptr,
+                         &m_language_stored_program)) {
       my_error(ER_LANGUAGE_COMPONENT_UNSUPPORTED_LANGUAGE, MYF(0),
                m_chistics->language.str);
       m_language_stored_program = nullptr;
       return true;
     }
-    if (service->parse(m_language_stored_program, nullptr)) return true;
+    if ((*service)->parse(m_language_stored_program, nullptr)) return true;
   }
   return false;
 }
@@ -2799,8 +2803,8 @@ bool sp_head::execute_function(THD *thd, Item **argp, uint argcount,
     /* Arguments must be fixed in Item_func_sp::fix_fields */
     assert(argp[arg_no]->fixed);
 
-    err_status = func_runtime_ctx->set_variable(thd, arg_no, &(argp[arg_no]));
-
+    err_status =
+        func_runtime_ctx->set_variable(thd, false, arg_no, &(argp[arg_no]));
     if (err_status) goto err_with_cleanup;
   }
 
@@ -2983,11 +2987,12 @@ bool sp_head::execute_procedure(THD *thd, mem_root_deque<Item *> *args) {
   sp_rcontext *proc_runtime_ctx =
       sp_rcontext::create(thd, m_root_parsing_ctx, nullptr);
 
-  if (!proc_runtime_ctx) {
+  if (proc_runtime_ctx == nullptr) {
     thd->sp_runtime_ctx = sp_runtime_ctx_saved;
 
-    if (sp_runtime_ctx_saved != nullptr) ::destroy_at(parent_sp_runtime_ctx);
-
+    if (sp_runtime_ctx_saved != nullptr) {
+      ::destroy_at(parent_sp_runtime_ctx);
+    }
     return true;
   }
 
@@ -3000,17 +3005,15 @@ bool sp_head::execute_procedure(THD *thd, mem_root_deque<Item *> *args) {
 
     for (uint i = 0; i < params; ++i, ++it_args) {
       Item *arg_item = *it_args;
-      if (!arg_item) break;
+      if (arg_item == nullptr) break;
 
       sp_variable *spvar = m_root_parsing_ctx->find_variable(i);
-
-      if (!spvar) continue;
+      if (spvar == nullptr) continue;
 
       if (spvar->mode != sp_variable::MODE_IN) {
         Settable_routine_parameter *srp =
             arg_item->get_settable_routine_parameter();
-
-        if (!srp) {
+        if (srp == nullptr) {
           my_error(ER_SP_NOT_VAR_ARG, MYF(0), i + 1, m_qname.str);
           err_status = true;
           break;
@@ -3018,15 +3021,17 @@ bool sp_head::execute_procedure(THD *thd, mem_root_deque<Item *> *args) {
       }
 
       if (spvar->mode == sp_variable::MODE_OUT) {
-        Item_null *null_item = new Item_null();
-
-        if (!null_item ||
-            proc_runtime_ctx->set_variable(thd, i, (Item **)&null_item)) {
+        Item *null_item = new Item_null();
+        if (null_item == nullptr) {
+          err_status = true;
+          break;
+        }
+        if (proc_runtime_ctx->set_variable(thd, false, i, &null_item)) {
           err_status = true;
           break;
         }
       } else {
-        if (proc_runtime_ctx->set_variable(thd, i, &*it_args)) {
+        if (proc_runtime_ctx->set_variable(thd, false, i, &*it_args)) {
           err_status = true;
           break;
         }
@@ -3270,6 +3275,15 @@ void sp_head::set_info(longlong created, longlong modified,
     m_chistics->comment.str = strmake_root(
         &main_mem_root, m_chistics->comment.str, m_chistics->comment.length);
 
+  m_chistics->m_imported_libraries = nullptr;
+  if (chistics->m_imported_libraries != nullptr)
+    for (auto &library : *chistics->m_imported_libraries)
+      if (m_chistics->add_imported_library(
+              {library.m_db.str, library.m_db.length},
+              {library.m_name.str, library.m_name.length},
+              {library.m_alias.str, library.m_alias.length}, &main_mem_root))
+        break;
+
   m_sql_mode = sql_mode;
 }
 
@@ -3357,7 +3371,7 @@ void sp_head::optimize() {
     }
   }
 
-  m_instructions.resize(dst);
+  m_instructions.erase(m_instructions.begin() + dst, m_instructions.end());
   bp.clear();
 }
 
@@ -3629,13 +3643,18 @@ bool sp_head::check_show_access(THD *thd, bool *full_access) {
 
   *full_access = has_full_view_routine_access(thd, m_db.str, m_definer_user.str,
                                               m_definer_host.str);
-  return *full_access ? false
-                      : !has_partial_view_routine_access(
-                            thd, m_db.str, m_name.str,
-                            m_type == enum_sp_type::PROCEDURE);
+  // User has full access
+  if (*full_access) return false;
+  return !has_partial_view_routine_access(thd, m_db.str, m_name.str,
+                                          enum_sp_type_to_acl_type(m_type));
 }
 
 bool sp_head::set_security_ctx(THD *thd, Security_context **save_ctx) {
+  if (m_type == enum_sp_type::LIBRARY) {
+    // Security context is never switched for the LIBRARY.
+    assert(false);
+    return true;
+  }
   *save_ctx = nullptr;
   const LEX_CSTRING definer_user = {m_definer_user.str, m_definer_user.length};
   const LEX_CSTRING definer_host = {m_definer_host.str, m_definer_host.length};
@@ -3654,7 +3673,7 @@ bool sp_head::set_security_ctx(THD *thd, Security_context **save_ctx) {
 
   if (*save_ctx &&
       check_routine_access(thd, EXECUTE_ACL, m_db.str, m_name.str,
-                           m_type == enum_sp_type::PROCEDURE, false)) {
+                           enum_sp_type_to_acl_type(m_type), false)) {
     m_security_ctx.restore_security_context(thd, *save_ctx);
     *save_ctx = nullptr;
     return true;

@@ -55,26 +55,18 @@ IF(WIN32)
     ENDIF()
   ENDIF()
 ELSEIF(APPLE)
-  # Version 3.12.4 is needed because the new build system of Xcode is not
-  # supported by cmake. 3.12.4 will force using the legacy build system.
-  # Version 3.9.2 is needed because INCLUDE_DIRECTORIES(SYSTEM ...) wasn't
-  # handled properly by the cmake Xcode generator.
-  # NOTE:
-  # cmake >= 3.19 will use the new build system by default for Xcode >= 12.x
   IF(CMAKE_GENERATOR STREQUAL "Xcode")
     SET(APPLE_XCODE 1)
-    CMAKE_MINIMUM_REQUIRED(VERSION 3.12.4)
-  ELSE()
-    CMAKE_MINIMUM_REQUIRED(VERSION 3.9.2)
   ENDIF()
-  # If this is macOS 11, we need cmake 3.18
+  # For macOS version >= 11 we need cmake 3.18
   # System libraries like
   #    /usr/lib/libresolv.dylib
   # are no longer present in the file system.
   # cmake >= 3.18 will look for .tbd files in the SDK instead
   # So we end up linking with:
   #    /Applications/Xcode.app/.../usr/lib/libresolv.tbd
-  # We must postpone the version test until we have called 'uname -r' below.
+  # cmake >= 3.19 will use the new build system by default for Xcode >= 12.x
+  CMAKE_MINIMUM_REQUIRED(VERSION 3.19)
 ELSEIF(UNIX)
   # This is currently minimum version on all supported platforms.
   IF(CMAKE_VERSION VERSION_LESS 3.14.6)
@@ -130,6 +122,9 @@ ENDIF()
 
 OPTION(WITH_DEBUG "Use dbug/safemutex" OFF)
 OPTION(CHECK_ERRMSG_FORMAT "Check printf format for English error messages" OFF)
+
+OPTION(DISABLE_ALL_PSI "DISABLE all calls to the PSI interface" OFF)
+MARK_AS_ADVANCED(DISABLE_ALL_PSI)
 
 # Use a default manufacturer if no manufacturer was identified.
 SET(MANUFACTURER_DOCSTRING
@@ -234,8 +229,8 @@ IF(APPLE)
 ENDIF()
 
 # Add all policies *after* CMAKE_MINIMUM_REQUIRED
-# Repeating CMAKE_MINIMUM_REQUIRED here will load defaults for 3.5.1
-CMAKE_MINIMUM_REQUIRED(VERSION 3.5.1)
+# Repeating CMAKE_MINIMUM_REQUIRED here will load defaults for 3.14.6
+CMAKE_MINIMUM_REQUIRED(VERSION 3.14.6)
 INCLUDE(cmake_policies NO_POLICY_SCOPE)
 
 MACRO(STRING_APPEND STRING_VAR INPUT)
@@ -401,16 +396,16 @@ IF(CMAKE_HOST_UNIX AND NOT FORCE_UNSUPPORTED_COMPILER
     ELSEIF(LINUX_SUSE_15)
       MESSAGE(STATUS "We need to look for a newer GCC on SUSE Linux.")
       IF(LINUX_SUSE_15)
-        FIND_PROGRAM(ALTERNATIVE_GCC gcc-12
+        FIND_PROGRAM(ALTERNATIVE_GCC gcc-13
           NO_DEFAULT_PATH
           PATHS "/usr/bin")
-        FIND_PROGRAM(ALTERNATIVE_GPP g++-12
+        FIND_PROGRAM(ALTERNATIVE_GPP g++-13
           NO_DEFAULT_PATH
           PATHS "/usr/bin")
-        FIND_PROGRAM(GCC_AR_EXECUTABLE gcc-ar-12
+        FIND_PROGRAM(GCC_AR_EXECUTABLE gcc-ar-13
           NO_DEFAULT_PATH
           PATHS "/usr/bin")
-        FIND_PROGRAM(GCC_RANLIB_EXECUTABLE gcc-ranlib-12
+        FIND_PROGRAM(GCC_RANLIB_EXECUTABLE gcc-ranlib-13
           NO_DEFAULT_PATH
           PATHS "/usr/bin")
       ENDIF()
@@ -429,24 +424,24 @@ IF(CMAKE_HOST_UNIX AND NOT FORCE_UNSUPPORTED_COMPILER
         MESSAGE(STATUS "Using ${ALTERNATIVE_GPP}")
       ELSE()
         MESSAGE(WARNING "Could not find newer gcc.")
-        MESSAGE(FATAL_ERROR "Please do zypper install gcc12 gcc12-c++\n"
+        MESSAGE(FATAL_ERROR "Please do zypper install gcc13 gcc13-c++\n"
           "or set CMAKE_C_COMPILER and CMAKE_CXX_COMPILER explicitly.")
       ENDIF()
     ELSEIF(SOLARIS)
-      MESSAGE(STATUS "Looking for GCC 10 on Solaris.")
+      MESSAGE(STATUS "Looking for GCC 11 on Solaris.")
       FIND_PROGRAM(ALTERNATIVE_GCC gcc
         NO_DEFAULT_PATH
-        PATHS "/usr/gcc/10/bin")
+        PATHS "/usr/gcc/11/bin")
       FIND_PROGRAM(ALTERNATIVE_GPP g++
         NO_DEFAULT_PATH
-        PATHS "/usr/gcc/10/bin")
+        PATHS "/usr/gcc/11/bin")
       IF (ALTERNATIVE_GCC AND ALTERNATIVE_GPP)
         SET(CMAKE_C_COMPILER ${ALTERNATIVE_GCC})
         SET(CMAKE_CXX_COMPILER ${ALTERNATIVE_GPP})
         MESSAGE(STATUS "Using ${ALTERNATIVE_GCC}")
         MESSAGE(STATUS "Using ${ALTERNATIVE_GPP}")
       ELSE()
-        MESSAGE(WARNING "Could not find /usr/gcc/10/bin/gcc")
+        MESSAGE(WARNING "Could not find /usr/gcc/11/bin/gcc")
       ENDIF()
     ENDIF()
   ENDIF()
@@ -516,6 +511,28 @@ MESSAGE(STATUS "CMAKE_MODULE_PATH is ${CMAKE_MODULE_PATH}")
 INCLUDE(mysql_version)
 PROJECT(${MYSQL_PROJECT_NAME}
   VERSION ${MAJOR_VERSION}.${MINOR_VERSION}.${PATCH_VERSION})
+
+# Various 3rd party libraries have this option.
+# Some have it ON, other OFF, by default.
+# https://cmake.org/cmake/help/latest/variable/BUILD_SHARED_LIBS.html:
+# "the top level project must also call option(BUILD_SHARED_LIBS ...)
+#  before bringing in its dependencies."
+# We want all libraries to be explicitly STATIC or SHARED.
+OPTION(BUILD_SHARED_LIBS "Build shared libraries by default" OFF)
+IF(BUILD_SHARED_LIBS)
+  MESSAGE(WARNING "Do not set BUILD_SHARED_LIBS to ON/TRUE")
+  SET(BUILD_SHARED_LIBS OFF)
+  SET(BUILD_SHARED_LIBS OFF CACHE INTERNAL "" FORCE)
+ENDIF()
+
+# https://cmake.org/cmake/help/latest/variable/CMAKE_SKIP_INSTALL_ALL_DEPENDENCY.html
+OPTION(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY
+  "Target 'install' does not depend on 'all'" OFF)
+IF(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY)
+  MESSAGE(WARNING "Do not set CMAKE_SKIP_INSTALL_ALL_DEPENDENCY to ON/TRUE")
+  SET(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY OFF)
+  SET(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY OFF CACHE INTERNAL "" FORCE)
+ENDIF()
 
 # Ninja only: List of available pools.
 SET_PROPERTY(GLOBAL PROPERTY JOB_POOLS one_job=1)
@@ -743,7 +760,6 @@ INCLUDE(CMakePushCheckState)
 INCLUDE(add_custom_target)
 INCLUDE(pkg-config)
 INCLUDE(character_sets)
-INCLUDE(link_options)
 INCLUDE(malloc_utils)
 INCLUDE(cpu_info)
 INCLUDE(fileutils)
@@ -1083,6 +1099,29 @@ IF(WITH_ASAN)
     SET(ASAN_LIB_DIR
       "${ASAN_LIB_DIR}/../lib/clang/${CMAKE_CXX_COMPILER_VERSION}/lib/windows")
     GET_FILENAME_COMPONENT(ASAN_LIB_DIR ${ASAN_LIB_DIR} REALPATH)
+  ELSEIF(WIN32_VS)
+    SET(HAVE_ASAN 1)
+    GET_FILENAME_COMPONENT(ASAN_DLL_DIR ${CMAKE_CXX_COMPILER} DIRECTORY)
+    # /GS  (Buffer Security Check)  is on by default
+    # 5072 ASAN enabled without debug information emission.
+    STRING_APPEND(CMAKE_C_FLAGS   " -fsanitize=address /GS- /wd5072 ")
+    STRING_APPEND(CMAKE_CXX_FLAGS " -fsanitize=address /GS- /wd5072 ")
+    STRING_APPEND(CMAKE_EXE_LINKER_FLAGS " /InferASanLibs")
+    STRING_APPEND(CMAKE_MODULE_LINKER_FLAGS " /InferASanLibs")
+    STRING_APPEND(CMAKE_SHARED_LINKER_FLAGS " /InferASanLibs")
+    # /InferASanLibs is incompatible with /INCREMENTAL used by feature checks.
+    SET(CMAKE_REQUIRED_LINK_OPTIONS "/INCREMENTAL:NO")
+
+    FIND_FILE(ASAN_DYNAMIC_LIB
+      NAMES clang_rt.asan_dynamic-x86_64.dll
+      PATHS ${ASAN_DLL_DIR}
+      NO_DEFAULT_PATH
+      )
+    IF(ASAN_DYNAMIC_LIB)
+      COPY_CUSTOM_DLL("${ASAN_DYNAMIC_LIB}" COPY_ASAN_LIB_TARGET)
+      ADD_CUSTOM_TARGET(copy_asan_lib_target ALL)
+      ADD_DEPENDENCIES(copy_asan_lib_target ${COPY_ASAN_LIB_TARGET})
+    ENDIF()
   ELSE()
     MY_SANITIZER_CHECK("-fsanitize=address" TRUE WITH_ASAN_OK)
     IF(WITH_ASAN_OK)
@@ -1222,7 +1261,7 @@ IF(LINUX AND NOT ALTERNATIVE_LD AND NOT FPROFILE_GENERATE AND NOT FPROFILE_USE)
   ENDIF()
 ENDIF()
 
-IF(LINUX_STANDALONE)
+IF(LINUX_STANDALONE OR SOLARIS)
   # ON by default in pushbuild, but only for standalone builds.
   # The comression does not play well with some RPM/DEB packaging.
   # Developers can set default in environment.
@@ -1257,12 +1296,16 @@ ENDIF()
 IF(UNIX AND MY_COMPILER_IS_GNU_OR_CLANG)
   # By default, do this for STANDALONE and tarball builds.
   # Off by default for sanitizer or valgrind builds.
+  # Off by default in pushbuild.
   # Off by default for Apple Clang.
-  IF((INSTALL_LAYOUT MATCHES "STANDALONE" OR
-        INSTALL_LAYOUT MATCHES "TARGZ" OR
-        INSTALL_LAYOUT MATCHES "SVR4"
+  # ON by default for SOLARIS (also in PB2), to reduce package sizes.
+  IF(SOLARIS)
+    SET(MINIMAL_RELWITHDEBINFO_DEFAULT ON)
+  ELSEIF((INSTALL_LAYOUT MATCHES "STANDALONE" OR
+          INSTALL_LAYOUT MATCHES "TARGZ"
         )
       AND NOT CMAKE_COMPILER_FLAG_WITH_SANITIZE AND NOT WITH_VALGRIND
+      AND NOT DEFINED ENV{PB2WORKDIR}
       AND NOT APPLE)
     SET(MINIMAL_RELWITHDEBINFO_DEFAULT ON)
   ELSE()
@@ -1351,9 +1394,9 @@ IF(CMAKE_C_LINK_FLAGS MATCHES "-fuse-ld=gold" OR
     "-fuse-ld=gold" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
 ENDIF()
 
-# Fedora 34, RHEL9: undefined reference to symbol 'crc32_z@@ZLIB_1.2.9'
-IF(LINUX_FEDORA_34 OR LINUX_RHEL9)
-  IF(NOT USING_LD_LLD)
+# RHEL9: undefined reference to symbol 'crc32_z@@ZLIB_1.2.9'
+IF(LINUX_RHEL9)
+  IF(NOT USING_LD_LLD AND NOT USING_LD_MOLD)
     STRING_APPEND(CMAKE_CXX_LINK_FLAGS " -Wl,--copy-dt-needed-entries")
   ENDIF()
 ENDIF()
@@ -1546,7 +1589,6 @@ ENDIF()
 INCLUDE(configure.cmake)
 
 # Common defines and includes
-ADD_DEFINITIONS(-DHAVE_CONFIG_H)
 ADD_DEFINITIONS(-D__STDC_LIMIT_MACROS)     # Enable C99 limit macros
 ADD_DEFINITIONS(-D__STDC_FORMAT_MACROS)    # Enable C99 printf format macros
 ADD_DEFINITIONS(-D_USE_MATH_DEFINES)       # Get access to M_PI, M_E, etc. in math.h
@@ -1698,6 +1740,25 @@ IF(APPLE)
   ENDIF()
   # The Xcode version is 1.2.12 which is too old
   LIST(REMOVE_ITEM SYSTEM_LIBRARIES ZLIB)
+  # Link with the correct version of libc++.dylib
+  # Also use ar/ranlib from the compiler bundle.
+  IF(CMAKE_CXX_COMPILER MATCHES "/opt/homebrew/Cellar" OR
+      CMAKE_CXX_COMPILER MATCHES ${HOMEBREW_HOME}
+      )
+    SET(CMAKE_AR ${CMAKE_CXX_COMPILER_AR})
+    SET(CMAKE_RANLIB ${CMAKE_CXX_COMPILER_RANLIB})
+    GET_FILENAME_COMPONENT(CXX_DIR ${CMAKE_CXX_COMPILER} DIRECTORY)
+    GET_FILENAME_COMPONENT(LLVM_DIR ${CXX_DIR} DIRECTORY)
+    SET(LLVMBUNDLE_LINKER_FLAGS " -L${LLVM_DIR}/lib/c++")
+    IF(EXISTS ${LLVM_DIR}/lib/unwind/libunwind.dylib)
+      STRING_APPEND(LLVMBUNDLE_LINKER_FLAGS " -L${LLVM_DIR}/lib/unwind -lunwind")
+    ELSEIF(EXISTS "${LLVM_DIR}/lib/libunwind.dylib")
+      STRING_APPEND(LLVMBUNDLE_LINKER_FLAGS " -L${LLVM_DIR}/lib -lunwind")
+    ENDIF()
+    STRING_APPEND(CMAKE_EXE_LINKER_FLAGS "${LLVMBUNDLE_LINKER_FLAGS}")
+    STRING_APPEND(CMAKE_MODULE_LINKER_FLAGS "${LLVMBUNDLE_LINKER_FLAGS}")
+    STRING_APPEND(CMAKE_SHARED_LINKER_FLAGS "${LLVMBUNDLE_LINKER_FLAGS}")
+  ENDIF()
 ENDIF()
 
 SET(WITH_SYSTEM_LIBS_DEFAULT OFF)
@@ -1753,6 +1814,31 @@ IF(WITH_SYSTEM_LIBS)
   # Don't redo the system analysis on subsequent runs of cmake
   UNSET(WITH_SYSTEM_LIBS)
   UNSET(WITH_SYSTEM_LIBS CACHE)
+ENDIF()
+
+# The "annobin" plugin will normally generate a warning message if it
+# detects that neither the -D_FORTIFY_SOURCE=2 nor the
+# -D_FORTIFY_SOURCE=3 options have been provided on the command line
+# and -flto has been enabled.  This is because LTO compilation hides
+# preprocessor options, so information about them cannot be passed on
+# to the annocheck tool.
+#
+# See output from rpm --eval %optflags
+# Some of our RPM spec files will filter away some of the output.
+# To ensure consistency, and a clean build, we may filter away -flto here.
+# Note that it must be done early, before any ADD_SUBDIRECTORY or
+# MYSQL_CHECK_XXX, so that we do not break any feature tests.
+IF(LINUX_RPM_PLATFORM)
+  IF(NOT CMAKE_C_FLAGS MATCHES "FORTIFY_SOURCE")
+    IF(CMAKE_C_FLAGS MATCHES "-specs=.*redhat-annobin")
+      REMOVE_CMAKE_COMPILER_FLAGS(CMAKE_C_FLAGS "${MY_COMPILER_FLAG_FLTO}")
+    ENDIF()
+  ENDIF()
+  IF(NOT CMAKE_CXX_FLAGS MATCHES "FORTIFY_SOURCE")
+    IF(CMAKE_CXX_FLAGS MATCHES "-specs=.*redhat-annobin")
+      REMOVE_CMAKE_COMPILER_FLAGS(CMAKE_CXX_FLAGS "${MY_COMPILER_FLAG_FLTO}")
+    ENDIF()
+  ENDIF()
 ENDIF()
 
 # See whether backtrace is supported.
@@ -2031,9 +2117,8 @@ ENDIF()
 IF((WITH_SSL_PATH OR ALTERNATIVE_SYSTEM_SSL) AND (LINUX_RHEL8 OR LINUX_RHEL9))
   SET(WITH_TIRPC "bundled")
 ENDIF()
-
-IF(WITH_TIRPC STREQUAL "bundled")
-  ADD_SUBDIRECTORY(extra/tirpc)
+IF(LINUX)
+  MYSQL_CHECK_RPC()
 ENDIF()
 
 IF(HAVE_ASAN AND MY_COMPILER_IS_CLANG AND WITH_PROTOBUF STREQUAL "bundled")
@@ -2077,8 +2162,8 @@ IF(WITH_PROTOBUF STREQUAL "bundled" OR WITH_FIDO STREQUAL "bundled")
       # Silence warning about CMP0075
       CMAKE_PUSH_CHECK_STATE()
       SET(CMAKE_REQUIRED_LIBRARIES)
-      ADD_SUBDIRECTORY(${CMAKE_SOURCE_DIR}/${CBOR_BUNDLE_SRC_PATH})
-      ADD_SUBDIRECTORY(${CMAKE_SOURCE_DIR}/${FIDO_BUNDLE_SRC_PATH})
+      ADD_SUBDIRECTORY(${CMAKE_SOURCE_DIR}/extra/libcbor)
+      ADD_SUBDIRECTORY(${CMAKE_SOURCE_DIR}/extra/libfido2)
       CMAKE_POP_CHECK_STATE()
     ENDIF()
   ENDIF()
@@ -2109,6 +2194,20 @@ OPTION(MYSQL_MAINTAINER_MODE
 INCLUDE(maintainer)
 INCLUDE(msvc_cppcheck)
 DO_MSVC_CPPCHECK()
+
+# Silence some warnings for unused performance schema stuff.
+IF(DISABLE_ALL_PSI AND MY_COMPILER_IS_GNU_OR_CLANG)
+  STRING_APPEND(CMAKE_CXX_FLAGS " -Wno-unused-parameter")
+  STRING_APPEND(CMAKE_CXX_FLAGS " -Wno-unused-variable")
+  MY_CHECK_CXX_COMPILER_WARNING("-Wunused-but-set-variable" HAS_WARN_FLAG)
+  IF(HAS_WARN_FLAG)
+    STRING_APPEND(CMAKE_CXX_FLAGS " ${HAS_WARN_FLAG}")
+  ENDIF()
+  MY_CHECK_CXX_COMPILER_WARNING("-Wdocumentation" HAS_WARN_FLAG)
+  IF(HAS_WARN_FLAG)
+    STRING_APPEND(CMAKE_CXX_FLAGS " ${HAS_WARN_FLAG}")
+  ENDIF()
+ENDIF()
 
 # We know that 3.12 generates extra-semi, and that 3.19 does not:
 IF(WITH_PROTOBUF STREQUAL "system" AND "${PROTOBUF_VERSION}" VERSION_LESS 3.19)
@@ -2201,6 +2300,7 @@ ADD_DEPENDENCIES(clang_tidy_prerequisites GenError)
 
 ADD_SUBDIRECTORY(include)
 ADD_SUBDIRECTORY(strings)
+ADD_SUBDIRECTORY(extra/unordered_dense)
 ADD_SUBDIRECTORY(vio)
 ADD_SUBDIRECTORY(mysys)
 ADD_SUBDIRECTORY(libmysql)
@@ -2296,16 +2396,16 @@ IF(NOT WITHOUT_SERVER AND WITH_UNIT_TESTS)
       # and several other boost files.
       MY_CHECK_CXX_COMPILER_WARNING("error=maybe-uninitialized" HAS_WARN_FLAG)
       IF(HAS_WARN_FLAG)
-        MY_TARGET_LINK_OPTIONS(server_unittest_library "${HAS_WARN_FLAG}")
+        TARGET_LINK_OPTIONS(server_unittest_library PRIVATE ${HAS_WARN_FLAG})
       ENDIF()
       # The mold linker and RelWithDebInfo build complains about
       # the new expression in Rpl_info_values::init()
+      # We get stringop warnings in functions generated by protobuf.
       IF(MY_COMPILER_IS_GNU)
-        MY_TARGET_LINK_OPTIONS(server_unittest_library
-          "-Wno-alloc-size-larger-than")
-        # In functions generated by protobuf:
-        MY_TARGET_LINK_OPTIONS(server_unittest_library
-          "-Wno-stringop-overflow")
+        TARGET_LINK_OPTIONS(server_unittest_library PRIVATE
+          -Wno-alloc-size-larger-than
+          -Wno-stringop-overflow
+          )
       ENDIF()
     ENDIF()
   ELSE()
@@ -2346,7 +2446,6 @@ INCLUDE(cmake/abi_check.cmake)
 INCLUDE(cmake/tags.cmake)
 
 CONFIGURE_FILE(config.h.cmake   ${CMAKE_BINARY_DIR}/include/my_config.h)
-CONFIGURE_FILE(config.h.cmake   ${CMAKE_BINARY_DIR}/include/config.h)
 CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/include/mysql_version.h.in
                ${CMAKE_BINARY_DIR}/include/mysql_version.h )
 CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/sql/sql_builtin.cc.in

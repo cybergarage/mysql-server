@@ -131,6 +131,13 @@ class RouterComponentTest : public ProcessManager, public ::testing::Test {
     ASSERT_EQ(*port_res, expected_port);
   }
 
+  static void verify_port(MySQLSession *session,
+                          std::vector<uint16_t> possible_node_ports) {
+    auto port_res = select_port(session);
+    ASSERT_TRUE(port_res) << port_res.error().message();
+    EXPECT_THAT(possible_node_ports, ::testing::Contains(port_res.value()));
+  }
+
   /*
    * check if an existing connection allows to execute a query.
    *
@@ -171,6 +178,24 @@ class RouterComponentTest : public ProcessManager, public ::testing::Test {
       const std::string &config_dir);
 
   static void copy_default_certs_to_datadir(const std::string &dst_dir);
+
+  static std::string plugin_output_directory();
+
+  /**
+   * create a ID token for OpenID connect.
+   *
+   * @param subject                subject of the ID-token 'sub'
+   * @param identity_provider_name 'name' of the identity provider
+   * @param expiry                 expiry of the ID token in seconds
+   * @param private_key_file       filename of a PEM file containing
+   *                               the private key
+   * @param outdir                 directory name to place the id-token file
+   *                               into.
+   */
+  stdx::expected<std::string, int> create_openid_connect_id_token_file(
+      const std::string &subject, const std::string &identity_provider_name,
+      int expiry, const std::string &private_key_file,
+      const std::string &outdir);
 
  protected:
   TcpPortPool port_pool_;

@@ -265,8 +265,8 @@ include/diff_tables.inc [test.group_query, test.no_group_query]
 drop tables test.group_query, test.no_group_query;
 EXPLAIN FORMAT=TREE SELECT DISTINCT a FROM t  WHERE a = 1 AND (b = 2 OR b = 15);
 EXPLAIN
--> Filter: ((t.a = 1) and ((t.b = 2) or (t.b = 15)))  (rows=1)
-    -> Covering index skip scan for deduplication on t using k1 over (a = 1)  (rows=1)
+-> Limit: 1 row(s)  (rows=1)
+    -> Covering index range scan on t using k1 over (a = 1 AND b = 2) OR (a = 1 AND b = 15)  (rows=51)
 
 FLUSH STATUS;
 SELECT DISTINCT a FROM t  WHERE a = 1 AND (b = 2 OR b = 15);
@@ -276,8 +276,8 @@ a
 SHOW STATUS LIKE 'handler_read%';
 Variable_name	Value
 Handler_read_first	0
-Handler_read_key	4
-Handler_read_last	1
+Handler_read_key	1
+Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
 Handler_read_rnd	0
@@ -289,7 +289,7 @@ GROUP BY a, b;
 EXPLAIN
 -> Group aggregate: max(t.d), min(t.d)  (rows=0.182)
     -> Filter: (((t.d = 1) or (t.d = 9)) and ((t.c = 3) or (t.c = 40)))  (rows=0.182)
-        -> Covering index lookup on t using k1 (a=1)  (rows=209)
+        -> Covering index lookup on t using k1 (a = 1)  (rows=209)
 
 FLUSH STATUS;
 SELECT a, MAX(d), MIN(d) FROM t  WHERE a = 1 AND (c = 3 OR c = 40) AND (d = 1 OR d = 9)
@@ -1391,8 +1391,8 @@ include/diff_tables.inc [test.group_query, test.no_group_query]
 drop tables test.group_query, test.no_group_query;
 EXPLAIN FORMAT=TREE SELECT DISTINCT a FROM t  WHERE a = 1 AND (b = 2 OR b = 15);
 EXPLAIN
--> Filter: ((t.a = 1) and ((t.b = 2) or (t.b = 15)))  (rows=1)
-    -> Covering index skip scan for deduplication on t using k1 over (a = 1)  (rows=1)
+-> Limit: 1 row(s)  (rows=1)
+    -> Covering index range scan on t using k1 over (a = 1 AND b = 2) OR (a = 1 AND b = 15)  (rows=51)
 
 FLUSH STATUS;
 SELECT DISTINCT a FROM t  WHERE a = 1 AND (b = 2 OR b = 15);
@@ -1402,8 +1402,8 @@ a
 SHOW STATUS LIKE 'handler_read%';
 Variable_name	Value
 Handler_read_first	0
-Handler_read_key	4
-Handler_read_last	1
+Handler_read_key	1
+Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
 Handler_read_rnd	0
@@ -1415,7 +1415,7 @@ GROUP BY a, b;
 EXPLAIN
 -> Group aggregate: max(t.d), min(t.d)  (rows=0.182)
     -> Filter: (((t.d = 1) or (t.d = 9)) and ((t.c = 3) or (t.c = 40)))  (rows=0.182)
-        -> Covering index lookup on t using k1 (a=1)  (rows=209)
+        -> Covering index lookup on t using k1 (a = 1)  (rows=209)
 
 FLUSH STATUS;
 SELECT a, MAX(d), MIN(d) FROM t  WHERE a = 1 AND (c = 3 OR c = 40) AND (d = 1 OR d = 9)
@@ -2392,8 +2392,8 @@ include/diff_tables.inc [test.group_query, test.no_group_query]
 drop tables test.group_query, test.no_group_query;
 EXPLAIN FORMAT=TREE SELECT DISTINCT a FROM t  WHERE a = 1 AND (b = 2 OR b = 15);
 EXPLAIN
--> Filter: ((t.a = 1) and ((t.b = 2) or (t.b = 15)))  (rows=1)
-    -> Covering index skip scan for deduplication on t using k1 over (a = 1)  (rows=1)
+-> Limit: 1 row(s)  (rows=1)
+    -> Covering index range scan on t using k1 over (a = 1 AND b = 15) OR (a = 1 AND b = 2)  (rows=51)
 
 FLUSH STATUS;
 SELECT DISTINCT a FROM t  WHERE a = 1 AND (b = 2 OR b = 15);
@@ -2403,8 +2403,8 @@ a
 SHOW STATUS LIKE 'handler_read%';
 Variable_name	Value
 Handler_read_first	0
-Handler_read_key	5
-Handler_read_last	1
+Handler_read_key	2
+Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
 Handler_read_rnd	0
@@ -2416,7 +2416,7 @@ GROUP BY a, b;
 EXPLAIN
 -> Group aggregate: max(t.d), min(t.d)  (rows=0.182)
     -> Filter: (((t.d = 1) or (t.d = 9)) and ((t.c = 3) or (t.c = 40)))  (rows=0.182)
-        -> Covering index lookup on t using k1 (a=1)  (rows=209)
+        -> Covering index lookup on t using k1 (a = 1)  (rows=209)
 
 FLUSH STATUS;
 SELECT a, MAX(d), MIN(d) FROM t  WHERE a = 1 AND (c = 3 OR c = 40) AND (d = 1 OR d = 9)
@@ -3393,8 +3393,8 @@ include/diff_tables.inc [test.group_query, test.no_group_query]
 drop tables test.group_query, test.no_group_query;
 EXPLAIN FORMAT=TREE SELECT DISTINCT a FROM t  WHERE a = 1 AND (b = 2 OR b = 15);
 EXPLAIN
--> Filter: ((t.a = 1) and ((t.b = 2) or (t.b = 15)))  (rows=1)
-    -> Covering index skip scan for deduplication on t using k1 over (a = 1)  (rows=1)
+-> Limit: 1 row(s)  (rows=1)
+    -> Covering index range scan on t using k1 over (a = 1 AND b = 2) OR (a = 1 AND b = 15)  (rows=51)
 
 FLUSH STATUS;
 SELECT DISTINCT a FROM t  WHERE a = 1 AND (b = 2 OR b = 15);
@@ -3404,8 +3404,8 @@ a
 SHOW STATUS LIKE 'handler_read%';
 Variable_name	Value
 Handler_read_first	0
-Handler_read_key	3
-Handler_read_last	1
+Handler_read_key	1
+Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
 Handler_read_rnd	0
@@ -3417,7 +3417,7 @@ GROUP BY a, b;
 EXPLAIN
 -> Group aggregate: max(t.d), min(t.d)  (rows=0.185)
     -> Filter: (((t.d = 1) or (t.d = 9)) and ((t.c = 3) or (t.c = 40)))  (rows=0.185)
-        -> Covering index lookup on t using k1 (a=1)  (rows=209)
+        -> Covering index lookup on t using k1 (a = 1)  (rows=209)
 
 FLUSH STATUS;
 SELECT a, MAX(d), MIN(d) FROM t  WHERE a = 1 AND (c = 3 OR c = 40) AND (d = 1 OR d = 9)

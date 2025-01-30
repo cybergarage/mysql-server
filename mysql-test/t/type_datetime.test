@@ -265,13 +265,9 @@ create table t1(f1 date);
 insert into t1 values('01-01-01'),('02-02-02'),('01-01-01'),('02-02-02');
 --disable_ps_protocol  # See bug #27245598.
 set @bug28261='';
---skip_if_hypergraph  # Different warnings.
 select if(@bug28261 = f1, '', @bug28261:= f1) from t1;
---skip_if_hypergraph  # Different warnings.
 select if(@bug28261 = f1, '', @bug28261:= f1) from t1;
---skip_if_hypergraph  # Different warnings.
 select if(@bug28261 = f1, '', @bug28261:= f1) from t1;
---enable_ps_protocol
 drop table t1;
 
 #
@@ -880,3 +876,23 @@ SELECT * FROM t WHERE a = CURRENT_TIMESTAMP;
 SELECT * FROM t WHERE a = CURRENT_DATE;
 SET timestamp = DEFAULT;
 DROP TABLE t;
+
+--echo #
+--echo # Bug#36705061: Case query assertion error
+--echo #
+
+SELECT CASE WHEN 1 THEN CURRENT_TIME() ELSE dt.n END AS ct
+FROM (SELECT NULL) AS dt(n)
+INTO @v;
+
+SELECT CASE WHEN 1 THEN CURRENT_TIMESTAMP() ELSE dt.n END AS ct
+FROM (SELECT NULL) AS dt(n)
+INTO @v;
+
+SELECT CASE WHEN 1 THEN NOW() ELSE dt.n END AS ct
+FROM (SELECT NULL) AS dt(n)
+INTO @v;
+
+SELECT CASE WHEN 1 THEN SYSDATE() ELSE dt.n END AS ct
+FROM (SELECT NULL) AS dt(n)
+INTO @v;

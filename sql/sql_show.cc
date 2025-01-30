@@ -130,7 +130,8 @@
 #include "sql/sql_partition.h"  // HA_USE_AUTO_PARTITION
 #include "sql/sql_plugin.h"     // PLUGIN_IS_DELETED, LOCK_plugin
 #include "sql/sql_plugin_ref.h"
-#include "sql/sql_profile.h"    // query_profile_statistics_info
+#include "sql/sql_profile.h"  // query_profile_statistics_info
+#include "sql/sql_rewrite.h"
 #include "sql/sql_table.h"      // primary_key_name
 #include "sql/sql_tmp_table.h"  // create_ondisk_from_heap
 #include "sql/sql_trigger.h"    // acquire_shared_mdl_for_trigger
@@ -344,6 +345,12 @@ bool Sql_cmd_show_create_function::check_privileges(THD *) { return false; }
 
 bool Sql_cmd_show_create_function::execute_inner(THD *thd) {
   return sp_show_create_routine(thd, enum_sp_type::FUNCTION, lex->spname);
+}
+
+bool Sql_cmd_show_create_library::check_privileges(THD *) { return false; }
+
+bool Sql_cmd_show_create_library::execute_inner(THD *thd) {
+  return sp_show_create_routine(thd, enum_sp_type::LIBRARY, lex->spname);
 }
 
 bool Sql_cmd_show_create_procedure::check_privileges(THD *) { return false; }
@@ -1459,7 +1466,8 @@ static const char *require_quotes(const char *name, size_t name_length) {
   @param length                length of the appending identifier
 */
 
-void append_identifier(String *packet, const char *name, size_t length) {
+void append_identifier_with_backtick(String *packet, const char *name,
+                                     size_t length) {
   const char *name_end;
   const char quote_char = '`';
 
@@ -1497,6 +1505,8 @@ void append_identifier(String *packet, const char *name, size_t length) {
 /**
   Convert and quote the given identifier if needed and append it to the
   target string. If the given identifier is empty, it will be quoted.
+  This function use the backtick or double quotes as escape char based on
+  sql_mode.
 
   @param thd                   thread handler
   @param packet                target string
@@ -1509,6 +1519,8 @@ void append_identifier(String *packet, const char *name, size_t length) {
 void append_identifier(const THD *thd, String *packet, const char *name,
                        size_t length, const CHARSET_INFO *from_cs,
                        const CHARSET_INFO *to_cs) {
+  if (thd == nullptr)
+    return append_identifier_with_backtick(packet, name, length);
   const char *name_end;
   char quote_char;
   int q;
@@ -1532,8 +1544,7 @@ void append_identifier(const THD *thd, String *packet, const char *name,
     cs_info = to_cs;
   }
 
-  q = thd != nullptr ? get_quote_char_for_identifier(thd, to_name, to_length)
-                     : '`';
+  q = get_quote_char_for_identifier(thd, to_name, to_length);
 
   if (q == EOF) {
     packet->append(to_name, to_length, packet->charset());
@@ -1598,14 +1609,6 @@ int get_quote_char_for_identifier(const THD *thd, const char *name,
     return EOF;
   if (thd->variables.sql_mode & MODE_ANSI_QUOTES) return '"';
   return '`';
-}
-
-void append_identifier(const THD *thd, String *packet, const char *name,
-                       size_t length) {
-  if (thd == nullptr)
-    append_identifier(packet, name, length);
-  else
-    append_identifier(thd, packet, name, length, nullptr, nullptr);
 }
 
 /* Append directory name (if exists) to CREATE INFO */
@@ -2548,8 +2551,28 @@ bool store_create_info(THD *thd, Table_ref *table_list, String *packet,
 
     if (share->engine_attribute.length) {
       packet->append(STRING_WITH_LEN(" /*!80021 ENGINE_ATTRIBUTE="));
-      append_unescaped(packet, share->engine_attribute.str,
-                       share->engine_attribute.length);
+
+      if (for_show_create_stmt &&
+          check_table_access(thd, CREATE_ACL, table_list, false, 1, true) &&
+          check_table_access(thd, ALTER_ACL, table_list, false, 1, true)) {
+        String rlb;
+        String original_query_str(share->engine_attribute.str,
+                                  share->engine_attribute.length,
+                                  system_charset_info);
+        redact_par_url(original_query_str, rlb);
+
+        append_unescaped(packet, rlb.ptr(), rlb.length());
+        // inform users without privileges that the result of SHOW CREATE
+        // TABLE is redacted. Useful for the case of redacted mysqldump
+        // result.
+        push_warning_printf(
+            thd, Sql_condition::SL_WARNING, ER_WARN_REDACTED_PRIVILEGES,
+            ER_THD(thd, ER_WARN_REDACTED_PRIVILEGES), share->table_name.str);
+
+      } else {
+        append_unescaped(packet, share->engine_attribute.str,
+                         share->engine_attribute.length);
+      }
       packet->append(STRING_WITH_LEN(" */"));
     }
     if (share->secondary_engine_attribute.length) {
@@ -2774,8 +2797,8 @@ class thread_info_compare {
 
 static const char *thread_state_info(THD *invoking_thd, THD *inspected_thd) {
   DBUG_TRACE;
-  if (inspected_thd->get_protocol()->get_rw_status()) {
-    if (inspected_thd->get_protocol()->get_rw_status() == 2)
+  if (inspected_thd->get_protocol_rw_status()) {
+    if (inspected_thd->get_protocol_rw_status() == 2)
       return "Sending to client";
     if (inspected_thd->get_command() == COM_SLEEP) return "";
     return "Receiving from client";
@@ -2875,9 +2898,9 @@ class List_process_list : public Do_THD_Impl {
         thd_info->host = host;
       } else
         thd_info->host = m_client_thd->mem_strdup(
-            inspect_sctx_host_or_ip.str[0]
-                ? inspect_sctx_host_or_ip.str
-                : inspect_sctx_host.length ? inspect_sctx_host.str : "");
+            inspect_sctx_host_or_ip.str[0] ? inspect_sctx_host_or_ip.str
+            : inspect_sctx_host.length     ? inspect_sctx_host.str
+                                           : "");
     }  // We've copied the security context, so release the lock.
 
     DBUG_EXECUTE_IF("processlist_acquiring_dump_threads_LOCK_thd_data", {
@@ -4080,11 +4103,10 @@ static int get_schema_tmp_table_columns_record(THD *thd, Table_ref *tables,
 
     // COLUMN_KEY
     pos = pointer_cast<const uchar *>(
-        field->is_flag_set(PRI_KEY_FLAG)
-            ? "PRI"
-            : field->is_flag_set(UNIQUE_KEY_FLAG)
-                  ? "UNI"
-                  : field->is_flag_set(MULTIPLE_KEY_FLAG) ? "MUL" : "");
+        field->is_flag_set(PRI_KEY_FLAG)        ? "PRI"
+        : field->is_flag_set(UNIQUE_KEY_FLAG)   ? "UNI"
+        : field->is_flag_set(MULTIPLE_KEY_FLAG) ? "MUL"
+                                                : "");
     table->field[TMP_TABLE_COLUMNS_COLUMN_KEY]->store(
         (const char *)pos, strlen((const char *)pos), cs);
 
@@ -4398,7 +4420,7 @@ static int get_schema_tmp_table_keys_record(THD *thd, Table_ref *tables,
       // Expression for functional key parts
       if (key_part->field != nullptr &&
           key_part->field->is_field_for_functional_index()) {
-        Value_generator *gcol = key_info->key_part->field->gcol_info;
+        Value_generator *gcol = key_part->field->gcol_info;
 
         table->field[TMP_TABLE_KEYS_EXPRESSION]->store(
             gcol->expr_str.str, gcol->expr_str.length, cs);
@@ -4966,7 +4988,7 @@ ST_FIELD_INFO tmp_table_keys_fields_info[] = {
     {"INDEX_SCHEMA", NAME_CHAR_LEN, MYSQL_TYPE_STRING, 0, 0, nullptr, 0},
     {"INDEX_NAME", NAME_CHAR_LEN, MYSQL_TYPE_STRING, 0, 0, "Key_name", 0},
     {"SEQ_IN_INDEX", 2, MYSQL_TYPE_LONGLONG, 0, 0, "Seq_in_index", 0},
-    {"COLUMN_NAME", NAME_CHAR_LEN, MYSQL_TYPE_STRING, 0, 0, "Column_name", 0},
+    {"COLUMN_NAME", NAME_CHAR_LEN, MYSQL_TYPE_STRING, 0, 1, "Column_name", 0},
     {"COLLATION", 1, MYSQL_TYPE_STRING, 0, 1, "Collation", 0},
     {"CARDINALITY", MY_INT64_NUM_DECIMAL_DIGITS, MYSQL_TYPE_LONGLONG, 0, 1,
      "Cardinality", 0},
@@ -5362,6 +5384,32 @@ static bool acquire_mdl_for_table(THD *thd, const char *db_name,
 }
 
 /**
+  Helper to look up a Trigger object in a TABLE_SHARE by trigger name.
+
+  @param share TABLE_SHARE in whose list of Trigger objects the lookup
+               is to be performed.
+  @param name  Name of trigger to find.
+
+  @return Pointer to Trigger object, or nullptr if no trigger with the
+          provided name was found.
+*/
+
+static Trigger *find_trigger_in_share(TABLE_SHARE *share,
+                                      const LEX_STRING &name) {
+  Trigger *t;
+  List_iterator_fast<Trigger> it(*(share->triggers));
+
+  while ((t = it++) != nullptr) {
+    if (!my_strnncoll(dd::Trigger::name_collation(),
+                      pointer_cast<const uchar *>(t->get_trigger_name().str),
+                      t->get_trigger_name().length,
+                      pointer_cast<const uchar *>(name.str), name.length))
+      return t;
+  }
+  return nullptr;
+}
+
+/**
   SHOW CREATE TRIGGER high-level implementation.
 
   @param thd      Thread context.
@@ -5414,12 +5462,12 @@ bool show_create_trigger(THD *thd, const sp_name *trg_name) {
     /* Perform closing actions and return error status. */
   }
 
-  if (!lst->table->triggers) {
+  if (!lst->table->s->triggers) {
     my_error(ER_TRG_DOES_NOT_EXIST, MYF(0));
     goto exit;
   }
 
-  trigger = lst->table->triggers->find_trigger(trg_name->m_name);
+  trigger = find_trigger_in_share(lst->table->s, trg_name->m_name);
 
   if (!trigger) {
     my_error(ER_TRG_CORRUPTED_FILE, MYF(0), trg_name->m_db.str,

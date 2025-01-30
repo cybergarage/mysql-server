@@ -395,6 +395,13 @@ extern ulong opt_keyring_migration_port;
 
 extern ulonglong global_conn_mem_limit;
 extern ulonglong global_conn_mem_counter;
+
+extern ulonglong global_conn_memory_status_limit;
+extern ulonglong conn_memory_status_limit;
+extern std::atomic<long>
+    atomic_count_hit_query_past_global_conn_mem_status_limit;
+extern std::atomic<long> atomic_count_hit_query_past_conn_mem_status_limit;
+
 /**
   Variable to check if connection related options are set
   as part of keyring migration.
@@ -494,6 +501,7 @@ extern PSI_thread_key key_thread_one_connection;
 extern PSI_thread_key key_thread_compress_gtid_table;
 extern PSI_thread_key key_thread_parser_service;
 extern PSI_thread_key key_thread_handle_con_admin_sockets;
+extern PSI_thread_key key_thread_rpl_opt_tracker;
 extern PSI_cond_key key_monitor_info_run_cond;
 
 extern PSI_file_key key_file_binlog;
@@ -660,6 +668,8 @@ extern uint opt_large_page_size;
 extern char lc_messages_dir[FN_REFLEN];
 extern char *lc_messages_dir_ptr;
 extern const char *log_error_dest;
+extern const char *log_dia_dest;
+extern bool log_diagnostic_enable;
 extern MYSQL_PLUGIN_IMPORT char reg_ext[FN_EXTLEN];
 extern MYSQL_PLUGIN_IMPORT uint reg_ext_length;
 extern MYSQL_PLUGIN_IMPORT uint lower_case_table_names;
@@ -712,10 +722,12 @@ extern mysql_mutex_t LOCK_rotate_binlog_master_key;
 extern mysql_mutex_t LOCK_partial_revokes;
 extern mysql_mutex_t LOCK_global_conn_mem_limit;
 extern mysql_mutex_t LOCK_authentication_policy;
+extern mysql_mutex_t LOCK_rpl_opt_tracker;
 
 extern mysql_cond_t COND_server_started;
 extern mysql_cond_t COND_compress_gtid_table;
 extern mysql_cond_t COND_manager;
+extern mysql_cond_t COND_rpl_opt_tracker;
 
 extern mysql_rwlock_t LOCK_sys_init_connect;
 extern mysql_rwlock_t LOCK_sys_init_replica;
@@ -818,8 +830,10 @@ extern SERVICE_TYPE_NO_CONST(registry) * srv_registry_no_lock;
    mysql_server component */
 extern SERVICE_TYPE(dynamic_loader_scheme_file) * scheme_file_srv;
 extern SERVICE_TYPE(dynamic_loader) * dynamic_loader_srv;
-extern SERVICE_TYPE(registry_registration) * registry_registration;
-extern SERVICE_TYPE(registry_registration) * registry_registration_no_lock;
+extern SERVICE_TYPE_NO_CONST(registry_registration) * srv_registry_registration;
+extern SERVICE_TYPE_NO_CONST(registry_registration) *
+    srv_registry_registration_no_lock;
+extern SERVICE_TYPE_NO_CONST(registry_query) * srv_registry_query;
 
 class Deployed_components;
 extern Deployed_components *g_deployed_components;

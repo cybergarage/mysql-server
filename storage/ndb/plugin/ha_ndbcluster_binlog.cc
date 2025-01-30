@@ -52,6 +52,7 @@
 #include "sql/transaction.h"
 #include "storage/ndb/include/ndbapi/NdbDictionary.hpp"
 #include "storage/ndb/include/ndbapi/ndb_cluster_connection.hpp"
+#include "storage/ndb/include/util/NdbSqlUtil.hpp"
 #include "storage/ndb/plugin/ha_ndbcluster_connection.h"
 #include "storage/ndb/plugin/ndb_anyvalue.h"
 #include "storage/ndb/plugin/ndb_apply_status_table.h"
@@ -93,7 +94,6 @@
 #include "storage/ndb/plugin/ndb_thd.h"
 #include "storage/ndb/plugin/ndb_thd_ndb.h"
 #include "storage/ndb/plugin/ndb_upgrade_util.h"
-#include "string_with_len.h"
 
 typedef NdbDictionary::Event NDBEVENT;
 typedef NdbDictionary::Table NDBTAB;
@@ -120,6 +120,7 @@ extern ulong opt_ndb_report_thresh_binlog_mem_usage;
 extern ulonglong opt_ndb_eventbuffer_max_alloc;
 extern uint opt_ndb_eventbuffer_free_percent;
 extern ulong opt_ndb_log_purge_rate;
+extern ulong opt_ndb_log_cache_size;
 
 void ndb_index_stat_restart();
 
@@ -5326,7 +5327,8 @@ NdbEventOperation *Ndb_binlog_client::create_event_op_in_NDB(
               (f->field_ptr() - table->record[0]) + (char *)table->record[1];
           attr1.rec = op->getPreValue(col_name, ptr1);
           assert(attr1.rec->aRef() == ptr1);  // uses provided ptr
-        } else if (!f->is_flag_set(BLOB_FLAG)) {
+        } else if (!f->is_flag_set(BLOB_FLAG) ||
+                   f->type() == MYSQL_TYPE_VECTOR) {
           DBUG_PRINT("info", ("%s non compatible", col_name));
           attr0.rec = op->getValue(col_name);
           attr1.rec = op->getPreValue(col_name);
@@ -5765,6 +5767,9 @@ int Ndb_binlog_thread::handle_data_get_blobs(const TABLE *table,
         // Skip field
         continue;
       }
+      if (field->type() == MYSQL_TYPE_VECTOR) {
+        continue;
+      }
       const NdbValue &value = value_array[i];
       if (value.blob == nullptr) {
         DBUG_PRINT("info", ("[%u] skipped", i));
@@ -5882,7 +5887,8 @@ void Ndb_binlog_thread::handle_data_unpack_record(TABLE *table,
 
     field->set_notnull(row_offset);
     if ((*value).ptr) {
-      if (!field->is_flag_set(BLOB_FLAG)) {
+      if (!field->is_flag_set(BLOB_FLAG) ||
+          field->type() == MYSQL_TYPE_VECTOR) {
         int is_null = (*value).rec->isNULL();
         if (is_null) {
           if (is_null > 0) {
@@ -5930,6 +5936,28 @@ void Ndb_binlog_thread::handle_data_unpack_record(TABLE *table,
           DBUG_PRINT("info",
                      ("[%u] SET", (*value).rec->getColumn()->getColumnNo()));
           DBUG_DUMP("info", field->field_ptr(), field->pack_length());
+        } else if (field->type() == MYSQL_TYPE_VECTOR) {
+          /*
+            Use blob format for vector value in row, length and pointer, rather
+            than the varbinary value itself.
+          */
+          Uint32 length;
+          Uint32 length_bytes;
+          auto col = (*value).rec->getColumn();
+          const uchar *data = (uchar *)(*value).rec->aRef();
+          const bool len_ok = NdbSqlUtil::get_var_length(col->getType(), data,
+                                                         col->getSizeInBytes(),
+                                                         length_bytes, length);
+          assert(len_ok);
+          if (unlikely(!len_ok)) {
+            ndb_log_warning("VECTOR value truncated when replicated");
+            length = col->getSizeInBytes() - length_bytes;
+          }
+          Field_vector *field_vector = down_cast<Field_vector *>(field);
+          field_vector->set_ptr_offset(buf - table->record[0], length,
+                                       data + length_bytes);
+          DBUG_PRINT("info", ("[%u] SET ptr: %p  len: %u", field->field_index(),
+                              data + length_bytes, length));
         } else {
           assert(
               !strcmp((*value).rec->getColumn()->getName(), field->field_name));
@@ -6582,6 +6610,30 @@ void Ndb_binlog_thread::fix_per_epoch_trans_settings(THD *thd) {
   thd->variables.character_set_client = &my_charset_latin1;
 }
 
+bool Ndb_binlog_thread::configure_binlog_cache_size(THD *thd,
+                                                    ulong new_cache_size) {
+  if (new_cache_size == m_configured_ndb_log_cache_size) {
+    // No change detected
+    return true;
+  }
+  log_info("Reconfiguring binlog cache size");
+
+  // Make sure that binlog cache has been created. Normally, the only time when
+  // it does not exist is during startup and then it will be created with
+  // default settings before being reconfigured below.
+  if (thd->binlog_setup_trx_data() != 0) {
+    // Failed to create binlog cache resources
+    return false;
+  }
+
+  if (thd->binlog_configure_trx_cache_size(new_cache_size)) {
+    // Failed to reconfigure cache
+    return false;
+  }
+  m_configured_ndb_log_cache_size = new_cache_size;
+  return true;
+}
+
 void Ndb_binlog_thread::release_thd_resources(THD *thd) {
   {
     // Check if THD::mem_root need to be released, normally there is nothing
@@ -6643,6 +6695,11 @@ bool Ndb_binlog_thread::handle_events_for_epoch(THD *thd, injector *inj,
   m_binlog_index_rows.init();
 
   fix_per_epoch_trans_settings(thd);
+
+  if (!configure_binlog_cache_size(thd, opt_ndb_log_cache_size)) {
+    log_error("Failed to configure --ndb-log-cache-size");
+    return false;  // Error
+  }
 
   // Create new binlog transaction
   injector_transaction trans(thd, opt_ndb_log_trans_dependency);
@@ -7048,7 +7105,7 @@ void Ndb_binlog_thread::commit_trans(injector_transaction &trans, THD *thd,
   if (m_cache_spill_checker.check_disk_spill(binlog_cache_disk_use)) {
     log_warning(
         "Binary log cache data overflowed to disk %u time(s). "
-        "Consider increasing --binlog-cache-size.",
+        "Consider increasing --ndb-log-cache-size.",
         m_cache_spill_checker.m_disk_spills);
   }
 
@@ -7255,6 +7312,7 @@ restart_cluster_failure:
   // wait_for_server_started() to ensure that the parts of
   // MySQL Server it uses has been created
   thd->init_query_mem_roots();
+  thd->set_time();
   lex_start(thd);
 
   if (do_reconnect_incident && ndb_binlog_running) {
@@ -7722,6 +7780,9 @@ restart_cluster_failure:
     // Self test functionality
     DBUG_EXECUTE_IF("ndb_binlog_log_table_maps",
                     { dbug_log_table_maps(i_ndb, current_epoch); });
+
+    DBUG_EXECUTE_IF("ndb_binlog_log_multi_server_id",
+                    { dbug_log_multi_server_id(i_ndb, current_epoch); });
 
     DBUG_EXECUTE_IF("ndb_binlog_inject_incident", {
       // Test rpl_injector function for writing incident to binlog

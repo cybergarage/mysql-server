@@ -529,50 +529,57 @@ bool copy_field_info(THD *thd, Item *orig_expr, Item *cloned_expr) {
           m_field(field) {}
   };
   mem_root_deque<Field_info> field_info(thd->mem_root);
-  Query_block *depended_from = nullptr;
-  Name_resolution_context *context = nullptr;
-  bool in_outer_ref = false;
+  class Collect_field_info : public Item_tree_walker {
+   public:
+    using Item_tree_walker::is_stopped;
+    using Item_tree_walker::stop_at;
+  };
+  Collect_field_info info;
+  Item_ref *ref_item = nullptr;
   // Collect information for fields from the original expression
   if (WalkItem(
-          orig_expr, enum_walk::PREFIX,
-          [&field_info, &depended_from, &context,
-           &in_outer_ref](Item *inner_item) {
-            Query_block *saved_depended_from = depended_from;
-            Name_resolution_context *saved_context = context;
-            if (inner_item->type() == Item::REF_ITEM ||
-                inner_item->type() == Item::FIELD_ITEM) {
-              Item_ident *ident = down_cast<Item_ident *>(inner_item);
-              // An Item_outer_ref always references an Item_ref object
-              // which has the reference to the original expression.
-              // Item_outer_ref and the original expression are updated
-              // with the "depended_from" information but not the Item_ref.
-              // So we skip the checks for Item_ref.
-              assert(in_outer_ref || depended_from == nullptr ||
-                     depended_from == ident->depended_from ||
-                     depended_from == ident->context->query_block);
-              in_outer_ref = inner_item->type() == Item::REF_ITEM &&
-                             down_cast<Item_ref *>(inner_item)->ref_type() ==
-                                 Item_ref::OUTER_REF;
-              if (ident->depended_from != nullptr) {
-                depended_from = ident->depended_from;
-              }
-              if (context == nullptr ||
-                  ident->context->query_block->nest_level >=
-                      context->query_block->nest_level) {
-                context = ident->context;
-              }
+          orig_expr, enum_walk::PREFIX | enum_walk::POSTFIX,
+          [&info, &field_info, &ref_item](Item *inner_item) {
+            if (info.is_stopped(inner_item)) return false;
+            if (ref_item == inner_item) {
+              // We have returned back to this root (POSTFIX) from where
+              // we copied the "depended_from" information. Reset it now.
+              ref_item = nullptr;
+              return false;
             }
-            if (inner_item->type() == Item::FIELD_ITEM) {
+            if (inner_item->type() == Item::REF_ITEM &&
+                inner_item->is_outer_reference()) {
+              // If we have cloned a reference item that is an outer
+              // reference, the underlying field might not be marked as
+              // such. So we copy the "depended_from" information from the
+              // reference.
+              ref_item = down_cast<Item_ref *>(inner_item);
+              return false;
+            } else if (inner_item->type() == Item::FIELD_ITEM) {
               Item_field *field = down_cast<Item_field *>(inner_item);
+              // If this field is being referenced, then it's "depended_from"
+              // is part of reference. If it is part of the field as well,
+              // check for consistency and then use the information.
+              Query_block *depended_from =
+                  (ref_item != nullptr) ? ref_item->depended_from : nullptr;
+              Name_resolution_context *context =
+                  (ref_item != nullptr) ? ref_item->context : nullptr;
+              assert(depended_from == nullptr ||
+                     depended_from == field->depended_from ||
+                     depended_from == field->context->query_block);
+              depended_from = field->depended_from != nullptr
+                                  ? field->depended_from
+                                  : depended_from;
+              context = (context == nullptr)
+                            ? field->context
+                            : ((field->context->query_block->nest_level >=
+                                context->query_block->nest_level)
+                                   ? field->context
+                                   : context);
               if (field_info.push_back(Field_info(context, field->m_table_ref,
                                                   depended_from, field->field)))
                 return true;
-              // In case of Item_ref object with multiple fields having
-              // different depended_from and context information, we always
-              // need to take care to restore the depended_from and context
-              // to that of the Item_ref object.
-              depended_from = saved_depended_from;
-              context = saved_context;
+              info.stop_at(inner_item);
             }
             return false;
           }))
@@ -620,11 +627,20 @@ static Item *parse_expression(THD *thd, Item *item, Query_block *query_block,
     thd->lex = old_lex;
     return nullptr;  // OOM
   }
+  View_creation_ctx *view_creation_ctx =
+      derived_table != nullptr ? derived_table->view_creation_ctx : nullptr;
+
+  const CHARSET_INFO *charset = view_creation_ctx != nullptr
+                                    ? view_creation_ctx->get_client_cs()
+                                    : thd->charset();
+
   // Take care not to print the variable index for stored procedure variables.
   // Also do not write a cloned stored procedure variable to query logs.
   thd->lex->reparse_derived_table_condition = true;
+
   // Get the printout of the expression
-  StringBuffer<1024> str_buf(thd->charset());
+  StringBuffer<1024> str_buf(charset);
+
   // For printing parameters we need to specify the flag QT_NO_DATA_EXPANSION
   // because for a case when statement gets reprepared during execution, we
   // still need Item_param::print() to print the '?' rather than the actual data
@@ -680,8 +696,6 @@ static Item *parse_expression(THD *thd, Item *item, Query_block *query_block,
 
   // Get a newly created item from parser. Use the view creation
   // context if the item being parsed is part of a view.
-  View_creation_ctx *view_creation_ctx =
-      derived_table != nullptr ? derived_table->view_creation_ctx : nullptr;
   const bool result = parse_sql(thd, &parser_state, view_creation_ctx);
 
   // If a statement is being re-prepared, then all the parameters
@@ -919,7 +933,7 @@ bool Table_ref::setup_materialized_derived_tmp_table(THD *thd)
 
     const bool rc = derived_result->create_result_table(
         thd, *derived->get_unit_column_types(), is_distinct, create_options,
-        alias, false, false);
+        alias, false);
 
     if (m_derived_column_names)  // Restore names
       swap_column_names_of_unit_and_tmp_table(*derived->get_unit_column_types(),
@@ -1205,9 +1219,11 @@ bool Condition_pushdown::make_cond_for_derived() {
 
 Item *Condition_pushdown::extract_cond_for_table(Item *cond) {
   cond->marker = Item::MARKER_NONE;
-  if ((m_checking_purpose == CHECK_FOR_DERIVED) && cond->const_item()) {
+  if ((m_checking_purpose == CHECK_FOR_DERIVED) &&
+      (cond->const_item() || cond->has_aggregation())) {
     // There is no benefit in pushing a constant condition, we can as well
     // evaluate it at the top query's level.
+    // We do not pushdown conditions with aggregate functions.
     return nullptr;
   }
   // Make a new condition

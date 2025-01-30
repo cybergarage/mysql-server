@@ -37,6 +37,7 @@
 #include "plugin/group_replication/include/observer_server_actions.h"
 #include "plugin/group_replication/include/observer_server_state.h"
 #include "plugin/group_replication/include/observer_trans.h"
+#include "plugin/group_replication/include/opt_tracker.h"
 #include "plugin/group_replication/include/perfschema/pfs.h"
 #include "plugin/group_replication/include/pipeline_stats.h"
 #include "plugin/group_replication/include/plugin.h"
@@ -48,6 +49,8 @@
 #include "plugin/group_replication/include/plugin_status_variables.h"
 #include "plugin/group_replication/include/plugin_variables.h"
 #include "plugin/group_replication/include/plugin_variables/recovery_endpoints.h"
+#include "plugin/group_replication/include/services/flow_control/get_metrics.h"
+#include "plugin/group_replication/include/services/management/management.h"
 #include "plugin/group_replication/include/services/message_service/message_service.h"
 #include "plugin/group_replication/include/services/status_service/status_service.h"
 #include "plugin/group_replication/include/sql_service/sql_service_interface.h"
@@ -681,6 +684,12 @@ int plugin_group_replication_start(char **error_message) {
   // Reset the coordinator in case there was a previous stop.
   group_action_coordinator->reset_coordinator_process();
 
+  /*
+    Reset start time before join the group to avoid that the
+    eviction service sees a old start time.
+  */
+  GR_start_time_maintain::reset_start_time();
+
   // GR delayed initialization.
   if (!server_engine_initialized()) {
     lv.wait_on_engine_initialization = true;
@@ -872,6 +881,7 @@ int initialize_plugin_and_join(
   lv.group_replication_running = true;
   lv.plugin_is_stopping = false;
   log_primary_member_details();
+  track_group_replication_enabled(true);
 
 err:
 
@@ -1368,6 +1378,7 @@ int plugin_group_replication_stop(char **error_message) {
   if (!error && lv.recovery_timeout_issue_on_stop)
     error = GROUP_REPLICATION_STOP_WITH_RECOVERY_TIMEOUT;
 
+  track_group_replication_enabled(false);
   LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_IS_STOPPED);
   return error;
 }
@@ -1862,6 +1873,12 @@ bool attempt_rejoin() {
   if (initialize_plugin_modules(modules_mask)) goto end;
 
   /*
+    Reset start time before join the group to avoid that the
+    eviction service sees a old start time.
+  */
+  GR_start_time_maintain::reset_start_time();
+
+  /*
     Finally we attempt the join itself.
   */
   DBUG_EXECUTE_IF("group_replication_fail_rejoin", goto end;);
@@ -2155,6 +2172,19 @@ int plugin_group_replication_init(MYSQL_PLUGIN plugin_info) {
                  "mode) service.");
     return 1;
   }
+  if (register_group_replication_management_services()) {
+    LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_ERROR_MSG,
+                 "Failed to initialize Group Replication Management service");
+    return 1;
+  }
+
+  if (gr::flow_control_metrics_service::
+          register_gr_flow_control_metrics_service()) {
+    LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_ERROR_MSG,
+                 "Failed to initialize Group Replication flow control "
+                 "service.");
+    return 1;
+  }
 
   // Initialize the recovery SSL option map
   initialize_ssl_option_map();
@@ -2191,6 +2221,8 @@ int plugin_group_replication_init(MYSQL_PLUGIN plugin_info) {
   // Set the atomic var to the value of the base plugin variable
   ov.transaction_size_limit_var = ov.transaction_size_limit_base_var;
 
+  track_group_replication_available();
+
   if (ov.start_group_replication_at_boot_var &&
       plugin_group_replication_start()) {
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_FAILED_TO_START_ON_BOOT);
@@ -2214,9 +2246,15 @@ int plugin_group_replication_deinit(void *p) {
   finalize_perfschema_module();
 
   gr::status_service::unregister_gr_status_service();
+  unregister_group_replication_management_services();
+
+  gr::flow_control_metrics_service::
+      unregister_gr_flow_control_metrics_service();
 
   if (plugin_group_replication_stop())
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_FAILED_TO_STOP_ON_PLUGIN_UNINSTALL);
+
+  track_group_replication_unavailable();
 
   if (group_member_mgr != nullptr) {
     delete group_member_mgr;
@@ -2364,6 +2402,15 @@ static int plugin_group_replication_check_uninstall(void *) {
              "Plugin is busy, it cannot be uninstalled. To"
              " force a stop run STOP GROUP_REPLICATION and then UNINSTALL"
              " PLUGIN group_replication.");
+    return 1;
+  }
+
+  if (gr::flow_control_metrics_service::
+          unregister_gr_flow_control_metrics_service()) {
+    my_error(ER_PLUGIN_CANNOT_BE_UNINSTALLED, MYF(0), "group_replication",
+             "Please uninstall the component"
+             " 'component_group_replication_flow_control_stats'"
+             " and then UNINSTALL PLUGIN group_replication.");
     return 1;
   }
 
@@ -3175,9 +3222,9 @@ static int check_flow_control_min_quota(MYSQL_THD, SYS_VAR *, void *save,
   if (check_flow_control_min_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
 
   return 0;
 }
@@ -3193,9 +3240,9 @@ static int check_flow_control_min_recovery_quota(MYSQL_THD, SYS_VAR *,
   if (check_flow_control_min_recovery_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
   return 0;
 }
 
@@ -3209,9 +3256,9 @@ static int check_flow_control_max_quota(MYSQL_THD, SYS_VAR *, void *save,
   if (check_flow_control_max_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
 
   return 0;
 }
@@ -3235,11 +3282,10 @@ static int check_sysvar_ulong_timeout(MYSQL_THD, SYS_VAR *var, void *save,
   longlong in_val;
   value->val_int(value, &in_val);
 
-  *(longlong *)save = (in_val < minimum)
-                          ? minimum
-                          : (static_cast<ulonglong>(in_val) < LONG_TIMEOUT)
-                                ? in_val
-                                : LONG_TIMEOUT;
+  *(longlong *)save = (in_val < minimum) ? minimum
+                      : (static_cast<ulonglong>(in_val) < LONG_TIMEOUT)
+                          ? in_val
+                          : LONG_TIMEOUT;
 
   return 0;
 }
@@ -3994,10 +4040,9 @@ static int check_member_weight(MYSQL_THD, SYS_VAR *, void *save,
     }
   }
 
-  *(uint *)save =
-      (in_val < MIN_MEMBER_WEIGHT)
-          ? MIN_MEMBER_WEIGHT
-          : (in_val < MAX_MEMBER_WEIGHT) ? in_val : MAX_MEMBER_WEIGHT;
+  *(uint *)save = (in_val < MIN_MEMBER_WEIGHT)   ? MIN_MEMBER_WEIGHT
+                  : (in_val < MAX_MEMBER_WEIGHT) ? in_val
+                                                 : MAX_MEMBER_WEIGHT;
 
   return 0;
 }

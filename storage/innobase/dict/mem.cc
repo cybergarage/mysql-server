@@ -233,8 +233,7 @@ dict_table_t *dict_mem_table_create(const char *name, space_id_t space,
   dict_table_stats_lock() will not be noop. */
   dict_table_stats_latch_create(table, true);
 
-  table->autoinc_lock =
-      static_cast<ib_lock_t *>(mem_heap_alloc(heap, lock_get_size()));
+  table->autoinc_lock = lock_alloc_from_heap(heap);
 
   /* lazy creation of table autoinc latch */
   dict_table_autoinc_create_lazy(table);
@@ -320,7 +319,7 @@ dict_index_t *dict_mem_index_create(
 void dict_mem_table_add_col(dict_table_t *table, mem_heap_t *heap,
                             const char *name, ulint mtype, ulint prtype,
                             ulint len, bool is_visible, uint32_t phy_pos,
-                            uint8_t v_added, uint8_t v_dropped) {
+                            row_version_t v_added, row_version_t v_dropped) {
   dict_col_t *col;
   ulint i;
 
@@ -356,8 +355,8 @@ void dict_mem_table_add_col(dict_table_t *table, mem_heap_t *heap,
 
 void dict_mem_fill_column_struct(dict_col_t *column, ulint col_pos, ulint mtype,
                                  ulint prtype, ulint col_len, bool is_visible,
-                                 uint32_t phy_pos, uint8_t v_added,
-                                 uint8_t v_dropped) {
+                                 uint32_t phy_pos, row_version_t v_added,
+                                 row_version_t v_dropped) {
   column->ind = (unsigned int)col_pos;
   column->ord_part = 0;
   column->max_prefix = 0;

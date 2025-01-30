@@ -34,8 +34,8 @@
 #include "lex_string.h" /* LEX_CSTRING */
 #include "my_thread.h"  /* my_thread_id */
 #include "my_thread_local.h"
+#include "mysql/components/services/bits/thd.h"
 #include "mysql_com.h" /* Vio for violite.h */
-#include "plugin.h"    /* MYSQL_THD */
 
 enum enum_vio_type : int;
 #endif
@@ -56,7 +56,7 @@ extern "C" struct srv_session_info_service_st {
 
   unsigned int (*session_count)();
   unsigned int (*thread_count)(const void *plugin);
-} * srv_session_info_service;
+} *srv_session_info_service;
 
 #ifdef MYSQL_DYNAMIC_PLUGIN
 #define srv_session_info_get_thd(session) \

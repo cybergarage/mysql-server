@@ -128,8 +128,11 @@ IF(NOT WITHOUT_SERVER)
   # unless it is explicitly disabled on the command line.
   MYSQL_ADD_PLUGIN(ndbcluster ${NDBCLUSTER_SOURCES} STORAGE_ENGINE
     DEFAULT STATIC_ONLY
-    LINK_LIBRARIES ndbclient_static extra::rapidjson)
-
+    LINK_LIBRARIES
+    ndbclient_static
+    extra::rapidjson
+    extra::unordered_dense
+    )
   SET_PROPERTY(SOURCE plugin/ha_ndbcluster.cc
                PROPERTY COMPILE_DEFINITIONS
                NDB_TLS_SEARCH_PATH="${WITH_NDB_TLS_SEARCH_PATH}")
@@ -324,22 +327,6 @@ ENDIF()
 IF(WITH_NDB_JAVA)
   ADD_SUBDIRECTORY(clusterj)
 ENDIF()
-
-SET(WITH_NDB_NODEJS_DEFAULT ON)
-
-# Check if the default for WITH_NDB_NODEJS should be overriden
-# by environment variable
-IF(DEFINED ENV{WITH_NDB_NODEJS_DEFAULT})
-  SET(WITH_NDB_NODEJS_DEFAULT $ENV{WITH_NDB_NODEJS_DEFAULT})
-  MESSAGE(STATUS
-    "Default value for WITH_NDB_NODEJS set to ${WITH_NDB_NODEJS_DEFAULT}")
-ENDIF(DEFINED ENV{WITH_NDB_NODEJS_DEFAULT})
-
-OPTION(WITH_NDB_NODEJS
-  "Include NDB Cluster node.js components" ${WITH_NDB_NODEJS_DEFAULT})
-IF(WITH_NDB_NODEJS)
-  ADD_SUBDIRECTORY(nodejs)
-ENDIF(WITH_NDB_NODEJS)
 
 OPTION(WITH_NDBAPI_EXAMPLES
   "Build the NdbApi example programs" ${WITH_NDBAPI_EXAMPLES_DEFAULT})

@@ -28,11 +28,12 @@ SET(MY_TIME_SOURCES my_time.cc my_systime.cc)
 ADD_CONVENIENCE_LIBRARY(mytime ${MY_TIME_SOURCES})
 
 SET(MYSYS_SOURCES
-  array.cc
+  base64_encode.cc
   charset.cc
   dbug.cc
   decimal.cc
   errors.cc
+  escape_string.cc
   lf_alloc-pin.cc
   lf_dynarray.cc
   lf_hash.cc
@@ -86,6 +87,7 @@ SET(MYSYS_SOURCES
   my_rdtsc.cc
   my_read.cc
   my_rename.cc
+  my_rm_dir_w_symlink.cc
   my_seek.cc
   my_static.cc
   my_string.cc
@@ -97,6 +99,7 @@ SET(MYSYS_SOURCES
   my_thread.cc
   my_thr_init.cc
   my_user.cc
+  my_version.cc
   my_write.cc
   pack.cc
   print_version.cc
@@ -116,6 +119,7 @@ SET(MYSYS_SOURCES
   typelib.cc
   unhex.cc
   keyring_operations_helper.cc
+  stream_cipher.cc
   # From deleted mysys_ssl library
   crypt_genhash_impl.cc
   my_default.cc
@@ -127,6 +131,7 @@ SET(MYSYS_SOURCES
   my_md5.cc
   my_rnd.cc
   my_openssl_fips.cc
+  my_ssl_algo_cache.cc
 )
 LIST(APPEND MYSYS_SOURCES my_aes_openssl.cc)
 

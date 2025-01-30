@@ -34,9 +34,6 @@ ENDIF()
 
 INCLUDE_DIRECTORIES(SYSTEM ${GMOCK_INCLUDE_DIRS})
 
-# TODO(sgunders): Remove when all GMock tests use MOCK_METHOD().
-STRING(REPLACE "-Wsuggest-override" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-
 MY_CHECK_CXX_COMPILER_FLAG("-fno-builtin-memcmp" HAVE_NO_BUILTIN_MEMCMP)
 
 SET(DISABLE_PSI_DEFINITIONS
@@ -82,7 +79,7 @@ ADD_STATIC_LIBRARY(gunit_large
   gunit_test_main_server.cc
   test_utils.cc
   thread_utils.cc
-  LINK_LIBRARIES ext::icu ext::zlib
+  LINK_LIBRARIES ext::icu ext::zlib extra::unordered_dense
 )
 
 # Add a library for enable_win_jemalloc.cc
@@ -120,7 +117,6 @@ SET(TESTS
   decimal
   dns_srv_data
   dphyp
-  dynarray
   filesort_buffer
   filesort_compare
   filesort_mergechunk
@@ -131,10 +127,12 @@ SET(TESTS
   like_range
   m_string
   mdl
+  mem_root_array
   mem_root_deque
   mutex_lock
   my_alloc
   my_bitmap
+  my_char_traits
   my_error
   my_fileutils
   my_gcvt
@@ -272,6 +270,7 @@ SET(SERVER_TESTS
   opt_ref
   opt_trace
   persisted_variables
+  print_utils
   protocol_classic
   regexp_engine
   regexp_facade
@@ -332,7 +331,6 @@ ENDFOREACH()
 SET(SQL_GUNIT_LIB_SOURCE
   ${CMAKE_SOURCE_DIR}/sql/filesort_utils.cc
   ${CMAKE_SOURCE_DIR}/sql/mdl.cc
-  ${CMAKE_SOURCE_DIR}/sql/stream_cipher.cc
   ${CMAKE_SOURCE_DIR}/sql/sql_list.cc
   ${CMAKE_SOURCE_DIR}/sql/stateless_allocator.cc
   ${CMAKE_SOURCE_DIR}/sql-common/sql_string.cc
@@ -365,7 +363,7 @@ MYSQL_ADD_EXECUTABLE(merge_large_tests-t ${ALL_LARGE_TESTS}
   LINK_LIBRARIES gunit_large server_unittest_library
   )
 IF(MY_COMPILER_IS_GNU)
-  MY_TARGET_LINK_OPTIONS(merge_large_tests-t "-Wno-alloc-size-larger-than")
+  TARGET_LINK_OPTIONS(merge_large_tests-t PRIVATE -Wno-alloc-size-larger-than)
 ENDIF()
 
 FOREACH(test ${TESTS})

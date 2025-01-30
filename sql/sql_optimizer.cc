@@ -69,6 +69,7 @@
 #include "sql/derror.h"      // ER_THD
 #include "sql/enum_query_type.h"
 #include "sql/error_handler.h"  // Functional_index_error_handler
+#include "sql/field.h"
 #include "sql/handler.h"
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
@@ -406,7 +407,7 @@ bool JOIN::optimize(bool finalize_access_paths) {
   // if (query_block->materialized_derived_table_count) {
   {  // WL#6570
     for (Table_ref *tl = query_block->leaf_tables; tl; tl = tl->next_leaf) {
-      tl->access_path_for_derived = nullptr;
+      tl->ClearMaterializedPathCache();
       if (tl->is_view_or_derived()) {
         if (tl->optimize_derived(thd)) return true;
       } else if (tl->is_table_function()) {
@@ -541,7 +542,7 @@ bool JOIN::optimize(bool finalize_access_paths) {
         const_tables = tables = primary_tables = query_block->leaf_table_count;
         AccessPath *path =
             NewFakeSingleRowAccessPath(thd, /*count_examined_rows=*/true);
-        path = attach_access_paths_for_having_and_limit(path);
+        path = attach_access_paths_for_having_qualify_limit(path);
         m_root_access_path = path;
         /*
           There are no relevant conditions left from the WHERE;
@@ -1137,7 +1138,7 @@ AccessPath *JOIN::create_access_paths_for_zero_rows() const {
   if (send_row_on_empty_set()) {
     // Aggregate no rows into an aggregate row.
     path = NewZeroRowsAggregatedAccessPath(thd, zero_result_cause);
-    path = attach_access_paths_for_having_and_limit(path);
+    path = attach_access_paths_for_having_qualify_limit(path);
   } else {
     // Send no row at all (so also no need to check HAVING or LIMIT).
     path = NewZeroRowsAccessPath(thd, zero_result_cause);
@@ -1544,7 +1545,8 @@ bool JOIN::optimize_distinct_group_order() {
     }
   }
   if (!(!group_list.empty() || tmp_table_param.sum_func_count || windowing) &&
-      select_distinct && plan_is_single_table() &&
+      select_distinct &&
+      (plan_is_single_table() || query_block->original_tables_map == 1) &&
       rollup_state == RollupState::NONE) {
     int order_idx = -1, group_idx = -1;
     /*
@@ -1575,8 +1577,7 @@ bool JOIN::optimize_distinct_group_order() {
     bool all_order_fields_used;
     if ((o = create_order_from_distinct(
              thd, ref_items[REF_SLICE_ACTIVE], order.order, fields,
-             /*skip_aggregates=*/true,
-             /*convert_bit_fields_to_long=*/true, &all_order_fields_used))) {
+             /*skip_aggregates=*/true, &all_order_fields_used))) {
       group_list = ORDER_with_src(o, ESC_DISTINCT);
       const bool skip_group =
           skip_sort_order &&
@@ -2467,11 +2468,12 @@ static bool test_if_skip_sort_order(JOIN_TAB *tab, ORDER_with_src &order,
         table->force_index ||
         (is_group_by ? table->force_index_group : table->force_index_order);
 
-    // Find an ordering index alternative over the chosen plan iff
-    // prefer_ordering_index switch is on. This switch is overridden only when
-    // force index for order/group is specified.
+    // We try to find an ordering_index alternative over the chosen plan, if:
+    // 1. "prefer_ordering_index" switch is on or
+    // 2. Force index for order/group is specified or
+    // 3. Optimizer has chosen to do table scan currently.
     if (thd->optimizer_switch_flag(OPTIMIZER_SWITCH_PREFER_ORDERING_INDEX) ||
-        is_force_index)
+        is_force_index || ref_key == -1)
       test_if_cheaper_ordering(tab, &order, table, usable_keys, ref_key_hint,
                                select_limit, &best_key, &best_key_direction,
                                &select_limit, &best_key_parts,
@@ -3744,7 +3746,7 @@ Item_multi_eq *find_item_equal(COND_EQUAL *cond_equal,
   while (cond_equal) {
     List_iterator_fast<Item_multi_eq> li(cond_equal->current_level);
     while ((item = li++)) {
-      if (item->contains(item_field->field)) goto finish;
+      if (item->contains(item_field)) goto finish;
     }
     in_upper_level = true;
     cond_equal = cond_equal->upper_levels;
@@ -3905,7 +3907,7 @@ static bool check_simple_equality(THD *thd, Item *left_item, Item *right_item,
       return false;
     }
 
-    if (left_item_equal && left_item_equal == right_item_equal) {
+    if (left_item_equal != nullptr && left_item_equal == right_item_equal) {
       /*
         The equality predicate is inference of one of the existing
         multiple equalities, i.e the condition is already covered
@@ -3929,11 +3931,11 @@ static bool check_simple_equality(THD *thd, Item *left_item, Item *right_item,
       cond_equal->current_level.push_back(right_item_equal);
     }
 
-    if (left_item_equal) {
+    if (left_item_equal != nullptr) {
       /* left item was found in the current or one of the upper levels */
-      if (!right_item_equal)
+      if (right_item_equal == nullptr) {
         left_item_equal->add(down_cast<Item_field *>(right_item));
-      else {
+      } else {
         /* Merge two multiple equalities forming a new one */
         if (left_item_equal->merge(thd, right_item_equal)) return true;
         /* Remove the merged multiple equality from the list */
@@ -3944,10 +3946,10 @@ static bool check_simple_equality(THD *thd, Item *left_item, Item *right_item,
       }
     } else {
       /* left item was not found neither the current nor in upper levels  */
-      if (right_item_equal) {
+      if (right_item_equal != nullptr) {
         right_item_equal->add(down_cast<Item_field *>(left_item));
       } else {
-        /* None of the fields was found in multiple equalities */
+        /* None of the fields were found in multiple equalities */
         Item_multi_eq *item_equal =
             new Item_multi_eq(down_cast<Item_field *>(left_item),
                               down_cast<Item_field *>(right_item));
@@ -3959,111 +3961,115 @@ static bool check_simple_equality(THD *thd, Item *left_item, Item *right_item,
     return false;
   }
 
-  {
-    /* The predicate of the form field=const/const=field is processed */
-    Item *const_item = nullptr;
-    Item_field *field_item = nullptr;
-    if (left_item->type() == Item::FIELD_ITEM &&
-        (field_item = down_cast<Item_field *>(left_item)) &&
-        field_item->depended_from == nullptr &&
-        right_item->const_for_execution()) {
-      const_item = right_item;
-    } else if (right_item->type() == Item::FIELD_ITEM &&
-               (field_item = down_cast<Item_field *>(right_item)) &&
-               field_item->depended_from == nullptr &&
-               left_item->const_for_execution()) {
-      const_item = left_item;
+  // Handle predicate on form field = const or const = field
+  Item *const_item = nullptr;
+  Item_field *field_item = nullptr;
+  if (left_item->type() == Item::FIELD_ITEM &&
+      (field_item = down_cast<Item_field *>(left_item)) != nullptr &&
+      field_item->depended_from == nullptr &&
+      right_item->const_for_execution()) {
+    const_item = right_item;
+  } else if (right_item->type() == Item::FIELD_ITEM &&
+             (field_item = down_cast<Item_field *>(right_item)) != nullptr &&
+             field_item->depended_from == nullptr &&
+             left_item->const_for_execution()) {
+    const_item = left_item;
+  } else {
+    return false;
+  }
+
+  assert(field_item != nullptr && const_item != nullptr);
+
+  // Don't evaluate subqueries if they are disabled during optimization.
+  if (!evaluate_during_optimization(const_item,
+                                    thd->lex->current_query_block())) {
+    return false;
+  }
+  /*
+    If the constant expression contains a reference to the field
+    (for example, a = (a IS NULL)), we don't want to replace the
+    field with the constant expression as it makes the predicates
+    more complex and may introduce cycles in the Item tree.
+  */
+  if (const_item->walk(&Item::find_field_processor, enum_walk::POSTFIX,
+                       pointer_cast<uchar *>(field_item->field))) {
+    return false;
+  }
+  if (field_item->result_type() != const_item->result_type()) {
+    return false;
+  }
+  // Do not substitute possibly negative constants for unsigned fields.
+  if (field_item->result_type() == INT_RESULT &&
+      const_item->type() != Item::INT_ITEM &&
+      field_item->unsigned_flag != const_item->unsigned_flag) {
+    return false;
+  }
+  if (field_item->result_type() == STRING_RESULT) {
+    const CHARSET_INFO *cs = field_item->field->charset();
+    if (item == nullptr) {
+      Item_func_eq *const eq_item = new Item_func_eq(left_item, right_item);
+      if (eq_item == nullptr || eq_item->set_cmp_func()) return true;
+      eq_item->quick_fix_field();
+      item = eq_item;
     }
-
-    // Don't evaluate subqueries if they are disabled during optimization.
-    if (const_item != nullptr &&
-        !evaluate_during_optimization(const_item,
-                                      thd->lex->current_query_block()))
+    if ((cs != down_cast<Item_func *>(item)->compare_collation()) ||
+        !cs->coll->propagate(cs, nullptr, 0))
       return false;
-
-    /*
-      If the constant expression contains a reference to the field
-      (for example, a = (a IS NULL)), we don't want to replace the
-      field with the constant expression as it makes the predicates
-      more complex and may introduce cycles in the Item tree.
-    */
-    if (const_item != nullptr &&
-        const_item->walk(&Item::find_field_processor, enum_walk::POSTFIX,
-                         pointer_cast<uchar *>(field_item->field)))
+    // Don't build multiple equalities mixing strings and JSON, not even
+    // when they have the same collation, since string comparison and JSON
+    // comparison are very different.
+    if ((field_item->data_type() == MYSQL_TYPE_JSON) !=
+        (const_item->data_type() == MYSQL_TYPE_JSON)) {
       return false;
-
-    if (const_item && field_item->result_type() == const_item->result_type()) {
-      if (field_item->result_type() == STRING_RESULT) {
-        const CHARSET_INFO *cs = field_item->field->charset();
-        if (!item) {
-          Item_func_eq *const eq_item = new Item_func_eq(left_item, right_item);
-          if (eq_item == nullptr || eq_item->set_cmp_func()) return true;
-          eq_item->quick_fix_field();
-          item = eq_item;
-        }
-        if ((cs != down_cast<Item_func *>(item)->compare_collation()) ||
-            !cs->coll->propagate(cs, nullptr, 0))
-          return false;
-        // Don't build multiple equalities mixing strings and JSON, not even
-        // when they have the same collation, since string comparison and JSON
-        // comparison are very different.
-        if ((field_item->data_type() == MYSQL_TYPE_JSON) !=
-            (const_item->data_type() == MYSQL_TYPE_JSON)) {
-          return false;
-        }
-        // Similarly, strings and temporal types have different semantics for
-        // equality comparison.
-        if (const_item->is_temporal()) {
-          // No multiple equality for string columns compared to temporal
-          // values. See also comment in comparable_in_index().
-          if (!field_item->is_temporal()) {
-            return false;
-          }
-          // No multiple equality for TIME columns compared to temporal values.
-          // See also comment in comparable_in_index().
-          if (const_item->is_temporal_with_date() &&
-              !field_item->is_temporal_with_date()) {
-            return false;
-          }
-        }
+    }
+    // Similarly, strings and temporal types have different semantics for
+    // equality comparison.
+    if (const_item->is_temporal()) {
+      // No multiple equality for string columns compared to temporal
+      // values. See also comment in comparable_in_index().
+      if (!field_item->is_temporal()) {
+        return false;
       }
-
-      bool copyfl;
-      Item_multi_eq *multi_eq =
-          find_item_equal(cond_equal, field_item, &copyfl);
-      if (copyfl) {
-        multi_eq = new Item_multi_eq(multi_eq);
-        if (multi_eq == nullptr) return true;
-        cond_equal->current_level.push_back(multi_eq);
+      // No multiple equality for TIME columns compared to temporal values.
+      // See also comment in comparable_in_index().
+      if (const_item->is_temporal_with_date() &&
+          !field_item->is_temporal_with_date()) {
+        return false;
       }
-      if (multi_eq != nullptr) {
-        if (multi_eq->const_arg() != nullptr) {
-          // Make sure that the existing const and new one are of comparable
-          // collation.
-          DTCollation cmp_collation;
-          if (cmp_collation.set(const_item->collation,
-                                multi_eq->const_arg()->collation,
-                                MY_COLL_CMP_CONV) ||
-              cmp_collation.derivation == DERIVATION_NONE) {
-            return false;
-          }
-        }
-        /*
-          When adding this coonst_item, if this Item_multi_eq already had a
-          constant set and it's value is not also equal to this const_item,
-          we'll set the m_always_false = true as a condition cannot have
-          two distinct values at the same time.
-        */
-        if (multi_eq->add(thd, const_item, field_item)) return true;
-      } else {
-        multi_eq = new Item_multi_eq(const_item, field_item);
-        if (multi_eq == nullptr) return true;
-        cond_equal->current_level.push_back(multi_eq);
-      }
-      *simple_equality = true;
-      return false;
     }
   }
+  bool copyfl;
+  Item_multi_eq *multi_eq = find_item_equal(cond_equal, field_item, &copyfl);
+  if (copyfl) {
+    multi_eq = new Item_multi_eq(multi_eq);
+    if (multi_eq == nullptr) return true;
+    cond_equal->current_level.push_back(multi_eq);
+  }
+  if (multi_eq != nullptr) {
+    if (multi_eq->const_arg() != nullptr) {
+      // Ensure that the existing const and new one have comparable collations.
+      DTCollation cmp_collation;
+      if (cmp_collation.set(const_item->collation,
+                            multi_eq->const_arg()->collation,
+                            MY_COLL_CMP_CONV) ||
+          cmp_collation.derivation == DERIVATION_NONE) {
+        return false;
+      }
+    }
+    /*
+      When adding this const item, if this Item_multi_eq already had a constant
+      set and it's value is not also equal to this const_item, set
+      m_always_false = true as a condition cannot have two distinct values at
+      the same time.
+    */
+    if (multi_eq->add(thd, const_item, field_item)) return true;
+  } else {
+    multi_eq = new Item_multi_eq(const_item, field_item);
+    if (multi_eq == nullptr) return true;
+    cond_equal->current_level.push_back(multi_eq);
+  }
+  *simple_equality = true;
+
   return false;
 }
 
@@ -6123,6 +6129,7 @@ static void semijoin_types_allow_materialization(Table_ref *sj_nest) {
   sj_nest->nested_join->sjm.lookup_allowed = true;
 
   bool blobs_involved = false;
+  bool bit_fields_involved = false;
   uint total_lookup_index_length = 0;
   uint max_key_length, max_key_part_length, max_key_parts;
   /*
@@ -6144,6 +6151,7 @@ static void semijoin_types_allow_materialization(Table_ref *sj_nest) {
       return;
     }
     blobs_involved |= inner->is_blob_field();
+    bit_fields_involved |= inner->data_type() == MYSQL_TYPE_BIT;
 
     // Calculate the index length of materialized table
     const uint lookup_index_length = get_key_length_tmp_table(inner);
@@ -6154,7 +6162,8 @@ static void semijoin_types_allow_materialization(Table_ref *sj_nest) {
   if (total_lookup_index_length > max_key_length)
     sj_nest->nested_join->sjm.lookup_allowed = false;
 
-  if (blobs_involved) sj_nest->nested_join->sjm.lookup_allowed = false;
+  if (blobs_involved || bit_fields_involved)
+    sj_nest->nested_join->sjm.lookup_allowed = false;
 
   DBUG_PRINT("info", ("semijoin_types_allow_materialization: ok, allowed"));
 }
@@ -6294,9 +6303,9 @@ static ha_rows get_quick_record_count(THD *thd, JOIN_TAB *tab, ha_rows limit,
   SYNOPSIS
     get_tmp_table_rec_length()
       items            Represents a select list.
-      include_hidden   Used for temp table aggregate, to include hidden fields.
-      can_skip_aggs    Used for temp table aggregate to skip fields that are not
-                       included in the temp table.
+      include_hidden   include hidden fields.
+      can_skip_aggs    skip aggregations not included in the temp table.
+
 
   DESCRIPTION
     Calculate estimated record length for a temptable. It's an estimate because
@@ -6311,10 +6320,16 @@ static ha_rows get_quick_record_count(THD *thd, JOIN_TAB *tab, ha_rows limit,
 uint get_tmp_table_rec_length(const mem_root_deque<Item *> &items,
                               bool include_hidden, bool can_skip_aggs) {
   uint len = 0;
+  // (1) In some cases such as GROUP BY, the GROUP BY columns are included as
+  // hidden items in the JOIN fields, and these are also included in the temp
+  // table columns.  include_hidden is meant to indicate this.
+  // (2) Expressions that embed an aggregation function are sometimes not
+  // included in the temp table. E.g. 2*avg(id). can_skip_aggs is meant to
+  // indicate this.
   for (Item *item : items) {
-    if ((!include_hidden && item->hidden) ||
-        (can_skip_aggs && item->has_aggregation() &&
-         item->type() != Item::SUM_FUNC_ITEM))
+    if ((!include_hidden && item->hidden) ||          // (1)
+        (can_skip_aggs && item->has_aggregation() &&  // (2)
+         item->type() != Item::SUM_FUNC_ITEM))        // (2)
       continue;
     switch (item->result_type()) {
       case REAL_RESULT:
@@ -8084,9 +8099,9 @@ bool is_indexed_agg_distinct(JOIN *join,
   bool result = false;
   Field_map first_aggdistinct_fields;
 
-  if (join->primary_tables > 1 || /* reference more than 1 table */
-      join->select_distinct ||    /* or a DISTINCT */
-
+  if (join->query_block->original_tables_map > 1 ||  /* reference more than 1
+                                                        table originally */
+      join->select_distinct ||                       /* or a DISTINCT */
       join->query_block->is_non_primitive_grouped()) /* Check (B3) for
                                                       non-primitive grouping */
     return false;
@@ -8206,7 +8221,9 @@ static void add_loose_index_scan_and_skip_scan_keys(JOIN *join,
   const char *cause;
 
   /* Find the indexes that might be used for skip scan queries. */
-  if (join->where_cond && join->primary_tables == 1 &&
+  if (join->where_cond != nullptr &&
+      join->query_block->original_tables_map == 1 &&
+      join->query_block->original_tables_map == join_tab->table_ref->map() &&
       join->group_list.empty() &&
       !is_indexed_agg_distinct(join, &indexed_fields) &&
       !join->select_distinct) {
@@ -9305,7 +9322,7 @@ bool JOIN::generate_derived_keys() {
     table->derived_keys_ready = true;
     /* Process tables that aren't materialized yet. */
     if (table->uses_materialization() && !table->table->is_created() &&
-        table->generate_keys())
+        table->generate_keys(thd))
       return true;
   }
   return false;
@@ -9893,13 +9910,23 @@ static bool make_join_query_block(JOIN *join, Item *cond) {
                   recheck_reason = DONT_RECHECK;
                 }
               }
-              // We do a cost based search for an ordering index here. Do this
-              // only if prefer_ordering_index switch is on or an index is
-              // forced for order by
+
+              // We do a cost based search for an ordering index here, if:
+              // 1. "prefer_ordering_index" switch is on or
+              // 2. An index is forced for order by or
+              // 3. Optimizer has chosen to do table scan.
               if (recheck_reason != DONT_RECHECK &&
-                  (tab->table()->force_index_order ||
-                   thd->optimizer_switch_flag(
-                       OPTIMIZER_SWITCH_PREFER_ORDERING_INDEX))) {
+                  (thd->optimizer_switch_flag(
+                       OPTIMIZER_SWITCH_PREFER_ORDERING_INDEX) ||
+                   tab->table()->force_index_order || tab->type() == JT_ALL)) {
+                DBUG_EXECUTE_IF("prefer_ordering_index_check", {
+                  const char act[] =
+                      "now wait_for "
+                      "signal.prefer_ordering_index_check_continue";
+                  assert(!debug_sync_set_action(current_thd,
+                                                STRING_WITH_LEN(act)));
+                });
+
                 int best_key = -1;
                 ha_rows select_limit =
                     join->query_expression()->select_limit_cnt;
@@ -10493,15 +10520,21 @@ bool remove_eq_conds(THD *thd, Item *cond, Item **retcond,
     bool should_fix_fields = false;
     *cond_value = Item::COND_UNDEF;
     Item *item;
-    while ((item = li++)) {
-      Item *new_item;
+    while ((item = li++) != nullptr) {
+      Item **item_ptr = li.ref();
       Item::cond_result tmp_cond_value;
-      if (remove_eq_conds(thd, item, &new_item, &tmp_cond_value)) return true;
+      /*
+        Notice that remove_eq_conds() may call fold_condition(), which may
+        call THD::change_item_tree(), which may record the address of the
+        existing item. Passing item_ptr ensures the address persists as long as
+        optimization is valid.
+      */
+      if (remove_eq_conds(thd, item, item_ptr, &tmp_cond_value)) return true;
 
-      if (new_item == nullptr)
+      if (*item_ptr == nullptr) {
         li.remove();
-      else if (item != new_item) {
-        (void)li.replace(new_item);
+      } else if (*item_ptr != item) {
+        // Pointer to item was replaced in-place
         should_fix_fields = true;
       }
       if (*cond_value == Item::COND_UNDEF) *cond_value = tmp_cond_value;
@@ -10734,7 +10767,6 @@ ORDER *create_order_from_distinct(THD *thd, Ref_item_array ref_item_array,
                                   ORDER *order_list,
                                   mem_root_deque<Item *> *fields,
                                   bool skip_aggregates,
-                                  bool convert_bit_fields_to_long,
                                   bool *all_order_by_fields_used) {
   ORDER *group = nullptr, **prev = &group;
 
@@ -10751,8 +10783,6 @@ ORDER *create_order_from_distinct(THD *thd, Ref_item_array ref_item_array,
       *all_order_by_fields_used = false;
   }
 
-  Mem_root_array<std::pair<Item *, ORDER *>> bit_fields_to_add(thd->mem_root);
-
   for (Item *&item : VisibleFields(*fields)) {
     if (!item->const_item() && (!skip_aggregates || !item->has_aggregation()) &&
         item->marker != Item::MARKER_DISTINCT_GROUP) {
@@ -10767,21 +10797,7 @@ ORDER *create_order_from_distinct(THD *thd, Ref_item_array ref_item_array,
       ORDER *ord = (ORDER *)thd->mem_calloc(sizeof(ORDER));
       if (!ord) return nullptr;
 
-      if (item->type() == Item::FIELD_ITEM &&
-          item->data_type() == MYSQL_TYPE_BIT && convert_bit_fields_to_long) {
-        /*
-          Because HEAP tables can't index BIT fields we need to use an
-          additional hidden field for grouping because later it will be
-          converted to a LONG field. Original field will remain of the
-          BIT type and will be returned to a client.
-          @note setup_ref_array() needs to account for the extra space.
-          @note We need to defer the actual adding to after the loop,
-            or we will invalidate the iterator to “fields”.
-        */
-        Item_field *new_item = new Item_field(thd, (Item_field *)item);
-        ord->item = &item;  // Temporary; for the duplicate check above.
-        bit_fields_to_add.push_back(std::make_pair(new_item, ord));
-      } else if (ref_item_array.is_null()) {
+      if (ref_item_array.is_null()) {
         // No slices are in use, so just use the field from the list.
         ord->item = &item;
       } else {
@@ -10799,11 +10815,6 @@ ORDER *create_order_from_distinct(THD *thd, Ref_item_array ref_item_array,
     if (!ref_item_array.is_null()) {
       ref_item_array.pop_front();
     }
-  }
-  for (const auto &item_and_order : bit_fields_to_add) {
-    item_and_order.second->item =
-        thd->lex->current_query_block()->add_hidden_item(item_and_order.first);
-    thd->lex->current_query_block()->hidden_items_from_optimization++;
   }
   *prev = nullptr;
   return group;

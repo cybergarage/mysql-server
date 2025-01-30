@@ -97,6 +97,7 @@
 #endif
 
 #include <memory>
+#include <set>
 
 #include "../sql-common/client_extensions_macros.h"
 #include "client_settings.h"
@@ -121,7 +122,11 @@ struct MYSQL_STMT_EXT {
      **/
     uint n_params;
     char **names;
-  } bind_names_info;
+    MEM_ROOT mem_root; /* for bind params and names only */
+#ifndef NDEBUG
+    std::set<void *> *allocations;
+#endif
+  } bind_data;
 };
 
 /*
@@ -1066,6 +1071,77 @@ ulong STDCALL mysql_real_escape_string(MYSQL *mysql, char *to, const char *from,
   return (uint)mysql_real_escape_string_quote(mysql, to, from, length, '\'');
 }
 
+namespace {
+/*
+  Escape apostrophes by doubling them up
+
+  SYNOPSIS
+    escape_quotes_for_mysql()
+    charset_info        Charset of the strings
+    to                  Buffer for escaped string
+    to_length           Length of destination buffer, or 0
+    from                The string to escape
+    length              The length of the string to escape
+    quote               The quote the buffer will be escaped against
+
+  DESCRIPTION
+    This escapes the contents of a string by doubling up any character
+    specified by the quote parameter. This is used when the
+    NO_BACKSLASH_ESCAPES SQL_MODE is in effect on the server.
+
+  NOTE
+    To be consistent with escape_string_for_mysql(), to_length may be 0 to
+    mean "big enough"
+
+  RETURN VALUES
+    ~0          The escaped string did not fit in the to buffer
+    >=0         The length of the escaped string
+*/
+
+size_t escape_quotes_for_mysql(CHARSET_INFO *charset_info, char *to,
+                               size_t to_length, const char *from,
+                               size_t length, char quote) {
+  const char *to_start = to;
+  const char *end = nullptr;
+  const char *to_end = to_start + (to_length ? to_length - 1 : 2 * length);
+  bool overflow = false;
+  const bool use_mb_flag = use_mb(charset_info);
+  for (end = from + length; from < end; from++) {
+    int tmp_length = 0;
+    if (use_mb_flag && (tmp_length = my_ismbchar(charset_info, from, end))) {
+      if (to + tmp_length > to_end) {
+        overflow = true;
+        break;
+      }
+      while (tmp_length--) *to++ = *from++;
+      from--;
+      continue;
+    }
+    /*
+      We don't have the same issue here with a non-multi-byte character being
+      turned into a multi-byte character by the addition of an escaping
+      character, because we are only escaping the ' character with itself.
+     */
+    if (*from == quote) {
+      if (to + 2 > to_end) {
+        overflow = true;
+        break;
+      }
+      *to++ = quote;
+      *to++ = quote;
+    } else {
+      if (to + 1 > to_end) {
+        overflow = true;
+        break;
+      }
+      *to++ = *from;
+    }
+  }
+  *to = 0;
+  return overflow ? (ulong)~0 : (ulong)(to - to_start);
+}
+}  // namespace
+
 /**
   Escapes special characters in a string for use in an SQL statement.
 
@@ -1324,12 +1400,28 @@ bool cli_read_prepare_result(MYSQL *mysql, MYSQL_STMT *stmt) {
 
 void mysql_stmt_extension_bind_free(MYSQL_STMT_EXT *ext) {
   DBUG_TRACE;
-  if (ext->bind_names_info.n_params) {
-    for (uint idx = 0; idx < ext->bind_names_info.n_params; idx++) {
-      my_free(ext->bind_names_info.names[idx]);
+  ext->bind_data.n_params = 0;
+  ext->bind_data.names = nullptr;
+  ext->bind_data.mem_root.Clear();
+
+  DBUG_EXECUTE_IF("test_stmt_ext_allocations", {
+    for (auto alloc : *(ext->bind_data.allocations)) {
+      my_free(alloc);
     }
+    ext->bind_data.allocations->clear();
+  });
+}
+
+static void *stmt_ext_allocate(MYSQL_STMT_EXT *ext, size_t bytes) {
+  void *result = nullptr;
+  DBUG_EXECUTE_IF("test_stmt_ext_allocations", {
+    result = my_malloc(key_memory_MYSQL, bytes, MYF(0));
+    ext->bind_data.allocations->insert(result);
+  });
+  if (result == nullptr) {
+    result = ext->bind_data.mem_root.Alloc(bytes);
   }
-  memset(&ext->bind_names_info, 0, sizeof(ext->bind_names_info));
+  return result;
 }
 
 /*
@@ -1396,6 +1488,11 @@ MYSQL_STMT *STDCALL mysql_stmt_init(MYSQL *mysql) {
 
   ::new ((void *)&stmt->extension->fields_mem_root)
       MEM_ROOT(PSI_NOT_INSTRUMENTED, 2048);
+  ::new ((void *)&stmt->extension->bind_data.mem_root)
+      MEM_ROOT(PSI_NOT_INSTRUMENTED, 2048);
+#ifndef NDEBUG
+  stmt->extension->bind_data.allocations = new std::set<void *>();
+#endif
 
   return stmt;
 }
@@ -1877,8 +1974,8 @@ int cli_stmt_execute(MYSQL_STMT *stmt) {
     MYSQL_STMT_EXT *ext = stmt->extension;
 
     result = mysql_int_serialize_param_data(
-        &mysql->net, ext->bind_names_info.n_params, stmt->params,
-        const_cast<const char **>(ext->bind_names_info.names), 1, &param_data,
+        &mysql->net, ext->bind_data.n_params, stmt->params,
+        const_cast<const char **>(ext->bind_data.names), 1, &param_data,
         &param_length, 1, send_named_params, false, can_deal_with_flags);
     if (result != 0) {
       set_stmt_errmsg(stmt, &mysql->net);
@@ -2572,6 +2669,7 @@ bool STDCALL mysql_stmt_bind_named_param(MYSQL_STMT *stmt, MYSQL_BIND *binds,
   MYSQL_STMT_EXT *ext = stmt->extension;
 
   mysql_stmt_extension_bind_free(ext);
+  stmt->params = nullptr;
 
   if (!stmt->param_count) {
     if ((int)stmt->state < (int)MYSQL_STMT_PREPARE_DONE) {
@@ -2583,41 +2681,41 @@ bool STDCALL mysql_stmt_bind_named_param(MYSQL_STMT *stmt, MYSQL_BIND *binds,
   /* if any of the below is empty our work here is done */
   if (!n_params || !binds) return false;
 
-  /*
-    alloc_root will return valid address even in case when param_count
-    and field_count are zero. Thus we should never rely on stmt->bind
-    or stmt->params when checking for existence of placeholders or
-    result set.
-  */
-  int n_items = n_params;
-  // bind result parameters may have already been allocated separately
-  if (stmt->bind == nullptr) n_items += stmt->field_count;
-
-  if (!(stmt->params = (MYSQL_BIND *)stmt->mem_root->Alloc(sizeof(MYSQL_BIND) *
-                                                           n_items))) {
+  if (!(stmt->params = (MYSQL_BIND *)stmt_ext_allocate(
+            ext, sizeof(MYSQL_BIND) * n_params))) {
     set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate);
     return true;
   }
-  if (stmt->bind == nullptr) stmt->bind = stmt->params + n_params;
+
+  // bind result parameters may have already been allocated separately
+  if (stmt->bind == nullptr) {
+    if (!(stmt->bind = (MYSQL_BIND *)ext->fields_mem_root.Alloc(
+              sizeof(MYSQL_BIND) * stmt->field_count))) {
+      set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate);
+      return true;
+    }
+  }
 
   // copy binds array
   memcpy((char *)stmt->params, (char *)binds, sizeof(MYSQL_BIND) * n_params);
 
   // copy names array
-  ext->bind_names_info.n_params = n_params;
-  ext->bind_names_info.names =
-      (char **)stmt->mem_root->Alloc(sizeof(char *) * n_params);
+  ext->bind_data.n_params = n_params;
+  ext->bind_data.names =
+      (char **)stmt_ext_allocate(ext, sizeof(char *) * n_params);
 
   MYSQL_BIND *param = stmt->params;
   for (uint idx = 0; idx < n_params; idx++, param++) {
-    ext->bind_names_info.names[idx] =
-        (names && names[idx]) ? my_strdup(key_memory_MYSQL, names[idx], MYF(0))
-                              : nullptr;
+    if (names && names[idx]) {
+      const size_t len = strlen(names[idx]) + 1;
+      ext->bind_data.names[idx] = (char *)stmt_ext_allocate(ext, len);
+      memcpy(ext->bind_data.names[idx], names[idx], len);
+    } else {
+      ext->bind_data.names[idx] = nullptr;
+    }
     if (fix_param_bind(param, idx)) {
       set_stmt_error(stmt, CR_UNSUPPORTED_PARAM_TYPE, unknown_sqlstate);
-      for (uint idx2 = 0; idx2 <= idx; idx2++)
-        my_free(ext->bind_names_info.names[idx2]);
-      memset(&ext->bind_names_info, 0, sizeof(ext->bind_names_info));
+      mysql_stmt_extension_bind_free(ext);
       return true;
     }
   }
@@ -4371,6 +4469,10 @@ bool STDCALL mysql_stmt_close(MYSQL_STMT *stmt) {
       rc = stmt_command(mysql, COM_STMT_CLOSE, buff, 4, stmt);
     }
   }
+
+#ifndef NDEBUG
+  delete stmt->extension->bind_data.allocations;
+#endif
 
   my_free(stmt->result.alloc);
   my_free(stmt->mem_root);

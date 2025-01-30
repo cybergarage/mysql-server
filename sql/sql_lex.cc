@@ -70,7 +70,7 @@
 #include "sql/sql_parse.h"      // add_to_list
 #include "sql/sql_plugin.h"     // plugin_unlock_list
 #include "sql/sql_profile.h"
-#include "sql/sql_show.h"   // append_identifier
+#include "sql/sql_show.h"   // append_identifier_*
 #include "sql/sql_table.h"  // primary_key_name
 #include "sql/sql_yacc.h"
 #include "sql/system_variables.h"
@@ -485,6 +485,7 @@ void LEX::reset() {
 
   grant_if_exists = false;
   ignore_unknown_user = false;
+  m_has_external_tables = false;
   reset_rewrite_required();
 
   set_execute_only_in_secondary_engine(
@@ -493,6 +494,8 @@ void LEX::reset() {
   set_execute_only_in_hypergraph_optimizer(
       /*execute_in_hypergraph_optimizer_param=*/false,
       SUPPORTED_IN_BOTH_OPTIMIZERS);
+
+  sp_chistics.reset();
 }
 
 /**
@@ -1583,13 +1586,14 @@ static int lex_one_token(Lexer_yystype *yylval, THD *thd) {
         /*
            Note: "SELECT _bla AS 'alias'"
            _bla should be considered as a IDENT if charset haven't been found.
-           So we don't want to produce any warning in find_primary.
+           So we don't use MYF(MY_WME) with get_charset_by_csname to avoid
+           producing an error.
         */
 
         if (yylval->lex_str.str[0] == '_') {
           auto charset_name = yylval->lex_str.str + 1;
           const CHARSET_INFO *underscore_cs =
-              mysql::collation::find_primary(charset_name);
+              get_charset_by_csname(charset_name, MY_CS_PRIMARY, MYF(0));
           if (underscore_cs) {
             lip->warn_on_deprecated_charset(underscore_cs, charset_name);
             if (underscore_cs == &my_charset_utf8mb4_0900_ai_ci) {
@@ -2212,7 +2216,6 @@ Query_expression::Query_expression(enum_parsing_context parsing_context)
       m_query_result(nullptr),
       uncacheable(0),
       cleaned(UC_DIRTY),
-      types(current_thd->mem_root),
       select_limit_cnt(HA_POS_ERROR),
       offset_limit_cnt(0),
       item(nullptr),
@@ -2585,22 +2588,6 @@ bool Query_block::setup_base_ref_items(THD *thd) {
   // find_order_in_list() may need some extra space, so multiply by two.
   order_group_num *= 2;
 
-  // create_distinct_group() may need some extra space
-  if (is_distinct()) {
-    uint bitcount = 0;
-    for (Item *item : visible_fields()) {
-      /*
-        Same test as in create_distinct_group, when it pushes new items to the
-        end of base_ref_items. An extra test for 'fixed' which, at this
-        stage, will be true only for columns inserted for a '*' wildcard.
-      */
-      if (item->fixed && item->type() == Item::FIELD_ITEM &&
-          item->data_type() == MYSQL_TYPE_BIT)
-        ++bitcount;
-    }
-    order_group_num += bitcount;
-  }
-
   /*
     We have to create array in prepared statement memory if it is
     prepared statement
@@ -2612,10 +2599,9 @@ bool Query_block::setup_base_ref_items(THD *thd) {
 
   /*
     If it is possible that we transform IN(subquery) to a join to a derived
-    table, we will be adding DISTINCT (this possibly has the problem of BIT
-    columns as in the logic above), and we will also be adding one expression to
-    the SELECT list per decorrelated equality in WHERE. So we have to allocate
-    more space.
+    table, we will be adding DISTINCT, and we will also be adding one
+    expression to the SELECT list per decorrelated equality in WHERE. So we
+    have to allocate more space.
 
     The number of decorrelatable equalities is bounded by
     select_n_where_fields. Indeed an equality isn't counted in
@@ -2681,9 +2667,9 @@ void print_set_operation(const THD *thd, Query_term *op, String *str, int level,
     Query_term_set_op *qts = down_cast<Query_term_set_op *>(op);
     const bool needs_parens = level > 0;
     if (needs_parens) str->append('(');
-    for (uint i = 0; i < qts->m_children.size(); ++i) {
-      print_set_operation(thd, qts->m_children[i], str, level + 1, query_type);
-      if (i < qts->m_children.size() - 1) {
+    for (uint i = 0; i < qts->child_count(); ++i) {
+      print_set_operation(thd, qts->child(i), str, level + 1, query_type);
+      if (i < qts->child_count() - 1) {
         switch (op->term_type()) {
           case QT_UNION:
             str->append(STRING_WITH_LEN(" union "));
@@ -2697,7 +2683,7 @@ void print_set_operation(const THD *thd, Query_term *op, String *str, int level,
           default:
             assert(false);
         }
-        if (static_cast<signed int>(i) + 1 > qts->m_last_distinct) {
+        if (static_cast<signed int>(i) + 1 > qts->last_distinct()) {
           str->append(STRING_WITH_LEN("all "));
         }
       }
@@ -3656,6 +3642,7 @@ void Query_tables_list::reset_query_tables_list(bool init) {
   sroutines_list.clear();
   sroutines_list_own_last = sroutines_list.next;
   sroutines_list_own_elements = 0;
+  has_stored_functions = false;
   binlog_stmt_flags = 0;
   stmt_accessed_table_flag = 0;
   lock_tables_state = LTS_NOT_LOCKED;
@@ -3909,7 +3896,9 @@ void Query_expression::include_down(LEX *lex, Query_block *outer) {
   Being mergeable also means that derived table/view is updatable.
 
   A view/derived table is not mergeable if it is one of the following:
-   - A set operation (implementation restriction).
+   - A set operation or a parenthesized simple query followed by
+     ORDER BY / LIMIT (cf. query term type QT_UNARY) (implementation
+     restriction)
    - An aggregated query, or has HAVING, or has DISTINCT
      (A general aggregated query cannot be merged with a non-aggregated one).
    - A table-less query (unimportant special case).
@@ -3919,7 +3908,7 @@ void Query_expression::include_down(LEX *lex, Query_block *outer) {
 */
 
 bool Query_expression::is_mergeable() const {
-  if (is_set_operation()) return false;
+  if (!is_simple()) return false;
 
   Query_block *const select = first_query_block();
   return !select->is_grouped() && select->having_cond() == nullptr &&
@@ -4454,17 +4443,17 @@ enum_explain_type Query_block::type() const {
     // if left child, call block PRIMARY, else UNION/INTERSECT/EXCEPT
     switch (m_parent->term_type()) {
       case QT_EXCEPT:
-        if (m_parent->m_children[0] == this)
+        if (m_parent->child(0) == this)
           return enum_explain_type::EXPLAIN_PRIMARY;
         else
           return enum_explain_type::EXPLAIN_EXCEPT;
       case QT_UNION:
-        if (m_parent->m_children[0] == this)
+        if (m_parent->child(0) == this)
           return enum_explain_type::EXPLAIN_PRIMARY;
         else
           return enum_explain_type::EXPLAIN_UNION;
       case QT_INTERSECT:
-        if (m_parent->m_children[0] == this)
+        if (m_parent->child(0) == this)
           return enum_explain_type::EXPLAIN_PRIMARY;
         else
           return enum_explain_type::EXPLAIN_INTERSECT;
@@ -5276,4 +5265,46 @@ void get_select_options_str(ulonglong options, std::string *str) {
 
   // Delete the last space character.
   if (str->length() > len) str->pop_back();
+}
+
+Acl_type lex_type_to_acl_type(ulong lex_type) {
+  if (lex_type == TYPE_ENUM_FUNCTION) {
+    return Acl_type::FUNCTION;
+  }
+  if (lex_type == TYPE_ENUM_PROCEDURE) {
+    return Acl_type::PROCEDURE;
+  }
+  if (lex_type == TYPE_ENUM_LIBRARY) {
+    return Acl_type::LIBRARY;
+  }
+  assert(false);
+  return Acl_type::INVALID_TYPE;
+}
+
+enum_sp_type acl_type_to_enum_sp_type(Acl_type type) {
+  if (type == Acl_type::FUNCTION) {
+    return enum_sp_type::FUNCTION;
+  }
+  if (type == Acl_type::PROCEDURE) {
+    return enum_sp_type::PROCEDURE;
+  }
+  if (type == Acl_type::LIBRARY) {
+    return enum_sp_type::LIBRARY;
+  }
+  assert(false);
+  return enum_sp_type::INVALID_SP_TYPE;
+}
+
+Acl_type enum_sp_type_to_acl_type(enum_sp_type type) {
+  if (type == enum_sp_type::FUNCTION) {
+    return Acl_type::FUNCTION;
+  }
+  if (type == enum_sp_type::PROCEDURE) {
+    return Acl_type::PROCEDURE;
+  }
+  if (type == enum_sp_type::LIBRARY) {
+    return Acl_type::LIBRARY;
+  }
+  assert(false);
+  return Acl_type::INVALID_TYPE;
 }

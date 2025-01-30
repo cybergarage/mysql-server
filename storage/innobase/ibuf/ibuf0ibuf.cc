@@ -943,7 +943,7 @@ static inline bool ibuf_fixed_addr_page(const page_id_t &page_id,
 }
 
 /** Checks if a page is a level 2 or 3 page in the ibuf hierarchy of pages.
-Must not be called when recv_no_ibuf_operations==true.
+Must not be called when recv_recovery_is_on().
 @param[in]      page_id         page id
 @param[in]      page_size       page size
 @param[in]      x_latch         false if relaxed check (avoid latching the
@@ -959,7 +959,7 @@ bool ibuf_page_low(const page_id_t &page_id, const page_size_t &page_size,
   mtr_t local_mtr;
   page_t *bitmap_page;
 
-  ut_ad(!recv_no_ibuf_operations);
+  ut_ad(!recv_recovery_is_on());
   ut_ad(x_latch || mtr == nullptr);
 
   if (ibuf_fixed_addr_page(page_id, page_size)) {
@@ -3544,7 +3544,7 @@ static void ibuf_insert_to_index_page(
 
     ut_d(ut_error);
 
-    ut_o(return );
+    ut_o(return);
   }
 
   low_match = page_cur_search(block, index, entry, &page_cur);
@@ -3761,7 +3761,7 @@ static void ibuf_delete(const dtuple_t *entry, /*!< in: entry */
               (ulonglong)btr_page_get_index_id(page));
 
       ut_d(ut_error);
-      ut_o(return );
+      ut_o(return);
     }
 
     lock_update_delete(block, rec);

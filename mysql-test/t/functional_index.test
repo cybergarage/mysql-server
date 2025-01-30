@@ -137,7 +137,7 @@ CREATE TABLE t1 (col1 INT, INDEX ((ABS(col1))));
 DROP TABLE t1;
 
 --echo # Print out functional indexes on a temporary table. Note that
---echo # "Column_name" should be empty (NULL), and Expression should contain the
+--echo # "Column_name" should be NULL, and Expression should contain the
 --echo # expression for the functional index.
 CREATE TEMPORARY TABLE t1(a INT);
 CREATE INDEX idx ON t1 ((ABS(a)));
@@ -659,8 +659,8 @@ SET explain_json_format_version = DEFAULT;
 # Expect an index range scan. The old optimizer puts a redundant
 # filter on top of the range scan, whereas the hypergraph optimizer
 # doesn't. Accept both plans.
-SELECT COALESCE(JSON_EXTRACT(@explain, '$.inputs[0].operation'),
-                JSON_EXTRACT(@explain, '$.operation')) AS scan;
+SELECT COALESCE(JSON_EXTRACT(@explain, '$.query_plan.inputs[0].operation'),
+                JSON_EXTRACT(@explain, '$.query_plan.operation')) AS scan;
 
 SELECT id FROM t1 WHERE FIND_IN_SET('Admin', roles)>0;
 
@@ -678,7 +678,29 @@ CREATE TABLE t1 (
   INDEX i1((FIND_IN_SET('Admin', roles)))
 );
 
-
 --echo
 --echo # Clean up.
+DROP TABLE t1;
+
+--echo
+--echo #
+--echo # Bug#35497623: SHOW INDEXES with generated column may access wrong key-part
+--echo #
+
+--echo
+--echo # SHOW INDEXES on regular table:
+CREATE TABLE t1 (c1 INT);
+CREATE TABLE t2
+             (UNIQUE i3 TYPE BTREE (c1, (c1 REGEXP c1))) TABLE t1;
+SHOW INDEXES IN t2; /* regular table */
+DROP TABLE t2;
+DROP TABLE t1;
+
+--echo
+--echo # SHOW INDEXES on temporary table (different code path!):
+CREATE TABLE t1 (c1 INT);
+CREATE TEMPORARY TABLE t2
+       (UNIQUE i3 TYPE BTREE (c1, (c1 REGEXP c1))) TABLE t1;
+SHOW INDEXES IN t2; /* temporary table */
+DROP TABLE t2;
 DROP TABLE t1;

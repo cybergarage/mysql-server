@@ -4261,8 +4261,8 @@ EXPLAIN
     -> Limit: 1 row(s)  (rows=1.02)
         -> Nested loop inner join  (rows=1.02)
             -> Filter: (t1.c is not null)  (rows=1.02)
-                -> Index lookup on t1 using kp1 (kp1=t3.a)  (rows=1.02)
-            -> Single-row covering index lookup on t4 using PRIMARY (pk=t1.c)  (rows=1)
+                -> Index lookup on t1 using kp1 (kp1 = t3.a)  (rows=1.02)
+            -> Single-row covering index lookup on t4 using PRIMARY (pk = t1.c)  (rows=1)
 
 select * from t3 where a in 
 (select t1.kp1 from t1,t4 where kp1<20 and t4.pk=t1.c);
@@ -4400,6 +4400,605 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t1`) where (`test`.`t1`.`a` = `test`.`t1`.`a`)
 drop table t1;
+SET internal_tmp_mem_storage_engine='memory';
+CREATE TABLE t1 (a BIT(7)) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (64),(65),(65),(NULL),(66);
+CREATE TABLE t2 (a INT)  ENGINE=InnoDB;
+INSERT INTO t2 VALUES (61),(64),(65);
+ANALYZE TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+test.t2	analyze	status	OK
+SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+a
+64
+65
+EXPLAIN SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t2`.`a` AS `a` from `test`.`t2` semi join (`test`.`t1`) where (`test`.`t2`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=3)
+    -> Table scan on t2  (rows=3)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t2.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+a
+@
+A
+A
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Start temporary
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t2`) where (`test`.`t1`.`a` = `test`.`t2`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+EXPLAIN
+-> Remove duplicate t1 rows using temporary table (weedout)  (rows=3)
+    -> Nested loop inner join  (rows=3)
+        -> Table scan on t2  (rows=3)
+        -> Filter: (t1.a = t2.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+a
+@
+A
+A
+B
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t1`) where (`test`.`t1`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=5)
+    -> Table scan on t1  (rows=5)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t1.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+DROP TABLE t1, t2;
+CREATE TABLE t1 (a BIT(7)) ENGINE=MyISAM;
+INSERT INTO t1 VALUES (64),(65),(65),(NULL),(66);
+CREATE TABLE t2 (a INT)  ENGINE=MyISAM;
+INSERT INTO t2 VALUES (61),(64),(65);
+ANALYZE TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+test.t2	analyze	status	OK
+SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+a
+64
+65
+EXPLAIN SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t2`.`a` AS `a` from `test`.`t2` semi join (`test`.`t1`) where (`test`.`t2`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=3)
+    -> Table scan on t2  (rows=3)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t2.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+a
+@
+A
+A
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Start temporary
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t2`) where (`test`.`t1`.`a` = `test`.`t2`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+EXPLAIN
+-> Remove duplicate t1 rows using temporary table (weedout)  (rows=3)
+    -> Nested loop inner join  (rows=3)
+        -> Table scan on t2  (rows=3)
+        -> Filter: (t1.a = t2.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+a
+@
+A
+A
+B
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t1`) where (`test`.`t1`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=5)
+    -> Table scan on t1  (rows=5)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t1.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+DROP TABLE t1, t2;
+CREATE TABLE t1 (a BIT(7)) ENGINE=HEAP;
+INSERT INTO t1 VALUES (64),(65),(65),(NULL),(66);
+CREATE TABLE t2 (a INT)  ENGINE=HEAP;
+INSERT INTO t2 VALUES (61),(64),(65);
+ANALYZE TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	note	The storage engine for the table doesn't support analyze
+test.t2	analyze	note	The storage engine for the table doesn't support analyze
+SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+a
+64
+65
+EXPLAIN SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t2`.`a` AS `a` from `test`.`t2` semi join (`test`.`t1`) where (`test`.`t2`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=3)
+    -> Table scan on t2  (rows=3)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t2.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+a
+@
+A
+A
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Start temporary
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t2`) where (`test`.`t1`.`a` = `test`.`t2`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+EXPLAIN
+-> Remove duplicate t1 rows using temporary table (weedout)  (rows=3)
+    -> Nested loop inner join  (rows=3)
+        -> Table scan on t2  (rows=3)
+        -> Filter: (t1.a = t2.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+a
+@
+A
+A
+B
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t1`) where (`test`.`t1`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=5)
+    -> Table scan on t1  (rows=5)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t1.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+DROP TABLE t1, t2;
+SET internal_tmp_mem_storage_engine='TempTable';
+CREATE TABLE t1 (a BIT(7)) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (64),(65),(65),(NULL),(66);
+CREATE TABLE t2 (a INT)  ENGINE=InnoDB;
+INSERT INTO t2 VALUES (61),(64),(65);
+ANALYZE TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+test.t2	analyze	status	OK
+SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+a
+64
+65
+EXPLAIN SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t2`.`a` AS `a` from `test`.`t2` semi join (`test`.`t1`) where (`test`.`t2`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=3)
+    -> Table scan on t2  (rows=3)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t2.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+a
+@
+A
+A
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Start temporary
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t2`) where (`test`.`t1`.`a` = `test`.`t2`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+EXPLAIN
+-> Remove duplicate t1 rows using temporary table (weedout)  (rows=3)
+    -> Nested loop inner join  (rows=3)
+        -> Table scan on t2  (rows=3)
+        -> Filter: (t1.a = t2.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+a
+@
+A
+A
+B
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t1`) where (`test`.`t1`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=5)
+    -> Table scan on t1  (rows=5)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t1.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+DROP TABLE t1, t2;
+CREATE TABLE t1 (a BIT(7)) ENGINE=MyISAM;
+INSERT INTO t1 VALUES (64),(65),(65),(NULL),(66);
+CREATE TABLE t2 (a INT)  ENGINE=MyISAM;
+INSERT INTO t2 VALUES (61),(64),(65);
+ANALYZE TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+test.t2	analyze	status	OK
+SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+a
+64
+65
+EXPLAIN SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t2`.`a` AS `a` from `test`.`t2` semi join (`test`.`t1`) where (`test`.`t2`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=3)
+    -> Table scan on t2  (rows=3)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t2.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+a
+@
+A
+A
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Start temporary
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t2`) where (`test`.`t1`.`a` = `test`.`t2`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+EXPLAIN
+-> Remove duplicate t1 rows using temporary table (weedout)  (rows=3)
+    -> Nested loop inner join  (rows=3)
+        -> Table scan on t2  (rows=3)
+        -> Filter: (t1.a = t2.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+a
+@
+A
+A
+B
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t1`) where (`test`.`t1`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=5)
+    -> Table scan on t1  (rows=5)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t1.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+DROP TABLE t1, t2;
+CREATE TABLE t1 (a BIT(7)) ENGINE=HEAP;
+INSERT INTO t1 VALUES (64),(65),(65),(NULL),(66);
+CREATE TABLE t2 (a INT)  ENGINE=HEAP;
+INSERT INTO t2 VALUES (61),(64),(65);
+ANALYZE TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	note	The storage engine for the table doesn't support analyze
+test.t2	analyze	note	The storage engine for the table doesn't support analyze
+SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+a
+64
+65
+EXPLAIN SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t2`.`a` AS `a` from `test`.`t2` semi join (`test`.`t1`) where (`test`.`t2`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=3)
+    -> Table scan on t2  (rows=3)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t2.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+a
+@
+A
+A
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Start temporary
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t2`) where (`test`.`t1`.`a` = `test`.`t2`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+EXPLAIN
+-> Remove duplicate t1 rows using temporary table (weedout)  (rows=3)
+    -> Nested loop inner join  (rows=3)
+        -> Table scan on t2  (rows=3)
+        -> Filter: (t1.a = t2.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+a
+@
+A
+A
+B
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t1`) where (`test`.`t1`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=5)
+    -> Table scan on t1  (rows=5)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t1.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+DROP TABLE t1, t2;
+SET internal_tmp_mem_storage_engine=default;
+SET SESSION big_tables=true;
+CREATE TABLE t1 (a BIT(7)) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (64),(65),(65),(NULL),(66);
+CREATE TABLE t2 (a INT)  ENGINE=InnoDB;
+INSERT INTO t2 VALUES (61),(64),(65);
+ANALYZE TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+test.t2	analyze	status	OK
+SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+a
+64
+65
+EXPLAIN SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t2`.`a` AS `a` from `test`.`t2` semi join (`test`.`t1`) where (`test`.`t2`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=3)
+    -> Table scan on t2  (rows=3)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t2.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+a
+@
+A
+A
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Start temporary
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t2`) where (`test`.`t1`.`a` = `test`.`t2`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+EXPLAIN
+-> Remove duplicate t1 rows using temporary table (weedout)  (rows=3)
+    -> Nested loop inner join  (rows=3)
+        -> Table scan on t2  (rows=3)
+        -> Filter: (t1.a = t2.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+a
+@
+A
+A
+B
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t1`) where (`test`.`t1`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=5)
+    -> Table scan on t1  (rows=5)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t1.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+DROP TABLE t1, t2;
+CREATE TABLE t1 (a BIT(7)) ENGINE=MyISAM;
+INSERT INTO t1 VALUES (64),(65),(65),(NULL),(66);
+CREATE TABLE t2 (a INT)  ENGINE=MyISAM;
+INSERT INTO t2 VALUES (61),(64),(65);
+ANALYZE TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+test.t2	analyze	status	OK
+SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+a
+64
+65
+EXPLAIN SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t2`.`a` AS `a` from `test`.`t2` semi join (`test`.`t1`) where (`test`.`t2`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=3)
+    -> Table scan on t2  (rows=3)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t2.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+a
+@
+A
+A
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Start temporary
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t2`) where (`test`.`t1`.`a` = `test`.`t2`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+EXPLAIN
+-> Remove duplicate t1 rows using temporary table (weedout)  (rows=3)
+    -> Nested loop inner join  (rows=3)
+        -> Table scan on t2  (rows=3)
+        -> Filter: (t1.a = t2.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+a
+@
+A
+A
+B
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t1`) where (`test`.`t1`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=5)
+    -> Table scan on t1  (rows=5)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t1.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+DROP TABLE t1, t2;
+CREATE TABLE t1 (a BIT(7)) ENGINE=HEAP;
+INSERT INTO t1 VALUES (64),(65),(65),(NULL),(66);
+CREATE TABLE t2 (a INT)  ENGINE=HEAP;
+INSERT INTO t2 VALUES (61),(64),(65);
+ANALYZE TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	note	The storage engine for the table doesn't support analyze
+test.t2	analyze	note	The storage engine for the table doesn't support analyze
+SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+a
+64
+65
+EXPLAIN SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t2`.`a` AS `a` from `test`.`t2` semi join (`test`.`t1`) where (`test`.`t2`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t2 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=3)
+    -> Table scan on t2  (rows=3)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t2.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+a
+@
+A
+A
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Start temporary
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t2`) where (`test`.`t1`.`a` = `test`.`t2`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t2);
+EXPLAIN
+-> Remove duplicate t1 rows using temporary table (weedout)  (rows=3)
+    -> Nested loop inner join  (rows=3)
+        -> Table scan on t2  (rows=3)
+        -> Filter: (t1.a = t2.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+a
+@
+A
+A
+B
+EXPLAIN SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	NULL
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	20.00	Using where; Start temporary; End temporary
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a` from `test`.`t1` semi join (`test`.`t1`) where (`test`.`t1`.`a` = `test`.`t1`.`a`)
+EXPLAIN format=tree SELECT * FROM t1 WHERE a IN (SELECT a FROM t1);
+EXPLAIN
+-> Nested loop inner join  (rows=5)
+    -> Table scan on t1  (rows=5)
+    -> Limit: 1 row(s)  (rows=1)
+        -> Filter: (t1.a = t1.a)  (rows=1)
+            -> Table scan on t1  (rows=5)
+
+DROP TABLE t1, t2;
+SET SESSION big_tables=default;
 create table t1 (a int);
 insert into t1 values (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
 create table t2 as select * from t1;
@@ -13096,10 +13695,10 @@ EXPLAIN
     -> Limit: 1 row(s)  (rows=1.17)
         -> Filter: (t3.col_int is null)  (rows=1.17)
             -> Nested loop left join  (rows=1.17)
-                -> Covering index lookup on t1 using col_int_key (col_int_key=t4.col_int_key)  (rows=1.17)
+                -> Covering index lookup on t1 using col_int_key (col_int_key = t4.col_int_key)  (rows=1.17)
                 -> Nested loop inner join  (rows=1)
-                    -> Single-row index lookup on t2 using PRIMARY (pk=t1.pk)  (rows=1)
-                    -> Index lookup on t3 using col_int_key (col_int_key=t2.col_int)  (rows=1)
+                    -> Single-row index lookup on t2 using PRIMARY (pk = t1.pk)  (rows=1)
+                    -> Index lookup on t3 using col_int_key (col_int_key = t2.col_int)  (rows=1)
 
 SELECT *
 FROM t4
@@ -13162,12 +13761,12 @@ WHERE field1 IN (
 SELECT tv1.var_255_utf8
 FROM v1 AS tv1 LEFT JOIN v1 AS tv2 ON tv1.var_10_latin1=tv2.var_10_utf8);
 field1
-korrhrspki
-a
 ULWBF
+a
+i
+korrhrspki
 right
 x
-i
 DROP VIEW v1;
 DROP TABLE t1, tv;
 # 17832047 Crash in calculate_materialization_costs

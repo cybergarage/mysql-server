@@ -84,8 +84,8 @@
 #include "sql/strfunc.h"  // find_type2
 #include "sql/system_variables.h"
 #include "sql/transaction_info.h"
-#include "sql/tztime.h"             // Time_zone
-#include "sql/vector_conversion.h"  // get_dimensions
+#include "sql/tztime.h"  // Time_zone
+#include "sql_string.h"  // convert_to_printable
 #include "string_with_len.h"
 #include "template_utils.h"  // pointer_cast
 #include "typelib.h"
@@ -300,7 +300,7 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          // MYSQL_TYPE_DATE         MYSQL_TYPE_TIME
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_DATETIME     MYSQL_TYPE_YEAR
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_TINY,
+         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_SHORT,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_BIT
@@ -309,7 +309,7 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_INVALID
          MYSQL_TYPE_INVALID,
-         // MYSQL_TYPE_BOOL         MYSQL_TYPE_TINY
+         // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_TINY, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
          MYSQL_TYPE_NEWDECIMAL, MYSQL_TYPE_VARCHAR,
@@ -708,7 +708,7 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_STRING, MYSQL_TYPE_VARCHAR},
         /* MYSQL_TYPE_YEAR -> */
         {// MYSQL_TYPE_DECIMAL      MYSQL_TYPE_TINY
-         MYSQL_TYPE_DECIMAL, MYSQL_TYPE_TINY,
+         MYSQL_TYPE_DECIMAL, MYSQL_TYPE_SHORT,
          // MYSQL_TYPE_SHORT        MYSQL_TYPE_LONG
          MYSQL_TYPE_SHORT, MYSQL_TYPE_LONG,
          // MYSQL_TYPE_FLOAT        MYSQL_TYPE_DOUBLE
@@ -2960,6 +2960,7 @@ Field *Field_new_decimal::create_from_item(const Item *item) {
 }
 
 type_conversion_status Field_new_decimal::reset() {
+  my_decimal decimal_zero;
   (void)my_decimal2binary(0, &decimal_zero, ptr, precision, dec);
   return TYPE_OK;
 }
@@ -3010,6 +3011,7 @@ type_conversion_status Field_new_decimal::store_value(
   }
 #endif
 
+  my_decimal decimal_zero;
   /* check that we do not try to write negative value in unsigned field */
   if (is_unsigned() && decimal_value->sign()) {
     DBUG_PRINT("info", ("unsigned overflow"));
@@ -3631,9 +3633,9 @@ int Field_short::cmp(const uchar *a_ptr, const uchar *b_ptr) const {
   }
 
   if (is_unsigned())
-    return ((unsigned short)a < (unsigned short)b)
-               ? -1
-               : ((unsigned short)a > (unsigned short)b) ? 1 : 0;
+    return ((unsigned short)a < (unsigned short)b)   ? -1
+           : ((unsigned short)a > (unsigned short)b) ? 1
+                                                     : 0;
   return (a < b) ? -1 : (a > b) ? 1 : 0;
 }
 
@@ -4154,9 +4156,9 @@ int Field_longlong::cmp(const uchar *a_ptr, const uchar *b_ptr) const {
     b = longlongget(b_ptr);
   }
   if (is_unsigned())
-    return ((ulonglong)a < (ulonglong)b)
-               ? -1
-               : ((ulonglong)a > (ulonglong)b) ? 1 : 0;
+    return ((ulonglong)a < (ulonglong)b)   ? -1
+           : ((ulonglong)a > (ulonglong)b) ? 1
+                                           : 0;
   return (a < b) ? -1 : (a > b) ? 1 : 0;
 }
 
@@ -5737,7 +5739,7 @@ type_conversion_status Field_timef::store_internal(const MYSQL_TIME *ltime,
   type_conversion_status rc = store_packed(TIME_to_longlong_time_packed(*time));
   if (rc == TYPE_OK && non_zero_date(*ltime)) {
     /*
-      The DATE part got lost; we warn, like in Field_newdate::store_internal,
+      The DATE part got lost; we warn, like in Field_date::store_internal,
       and trigger some code in get_mm_leaf()
       (see err==TYPE_NOTE_TIME_TRUNCATED there).
     */
@@ -5879,12 +5881,12 @@ void Field_year::sql_type(String &res) const {
 ** In number context: YYYYMMDD
 ****************************************************************************/
 
-my_time_flags_t Field_newdate::date_flags(const THD *thd) const {
+my_time_flags_t Field_date::date_flags(const THD *thd) const {
   return TIME_FUZZY_DATE | DatetimeConversionFlags(thd);
 }
 
-type_conversion_status Field_newdate::store_internal(const MYSQL_TIME *ltime,
-                                                     int *warnings) {
+type_conversion_status Field_date::store_internal(const MYSQL_TIME *ltime,
+                                                  int *warnings) {
   /*
     If time zone displacement information is present in "ltime"
     - adjust the value to UTC based on the time zone
@@ -5909,7 +5911,7 @@ type_conversion_status Field_newdate::store_internal(const MYSQL_TIME *ltime,
   return TYPE_OK;
 }
 
-bool Field_newdate::get_date_internal(MYSQL_TIME *ltime) const {
+bool Field_date::get_date_internal(MYSQL_TIME *ltime) const {
   const uint32 tmp = uint3korr(ptr);
   ltime->day = tmp & 31;
   ltime->month = (tmp >> 5) & 15;
@@ -5921,39 +5923,39 @@ bool Field_newdate::get_date_internal(MYSQL_TIME *ltime) const {
   return false;
 }
 
-type_conversion_status Field_newdate::store_packed(longlong nr) {
+type_conversion_status Field_date::store_packed(longlong nr) {
   int warnings = 0;
   MYSQL_TIME ltime;
   TIME_from_longlong_date_packed(&ltime, nr);
   return store_internal(&ltime, &warnings);
 }
 
-bool Field_newdate::send_to_protocol(Protocol *protocol) const {
+bool Field_date::send_to_protocol(Protocol *protocol) const {
   if (is_null()) return protocol->store_null();
   MYSQL_TIME ltime;
   get_date(&ltime, 0);
   return protocol->store_date(ltime);
 }
 
-longlong Field_newdate::val_int() const {
+longlong Field_date::val_int() const {
   ASSERT_COLUMN_MARKED_FOR_READ;
   ulong j = uint3korr(ptr);
   j = (j % 32L) + (j / 32L % 16L) * 100L + (j / (16L * 32L)) * 10000L;
   return (longlong)j;
 }
 
-longlong Field_newdate::val_date_temporal() const {
+longlong Field_date::val_date_temporal() const {
   ASSERT_COLUMN_MARKED_FOR_READ;
   MYSQL_TIME ltime;
   return get_date_internal(&ltime) ? 0 : TIME_to_longlong_date_packed(ltime);
 }
 
-longlong Field_newdate::val_time_temporal() const {
+longlong Field_date::val_time_temporal() const {
   ASSERT_COLUMN_MARKED_FOR_READ;
   return 0;
 }
 
-String *Field_newdate::val_str(String *val_buffer, String *) const {
+String *Field_date::val_str(String *val_buffer, String *) const {
   ASSERT_COLUMN_MARKED_FOR_READ;
   val_buffer->alloc(field_length);
   val_buffer->length(field_length);
@@ -5983,20 +5985,19 @@ String *Field_newdate::val_str(String *val_buffer, String *) const {
   return val_buffer;
 }
 
-bool Field_newdate::get_date(MYSQL_TIME *ltime,
-                             my_time_flags_t fuzzydate) const {
+bool Field_date::get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) const {
   return get_internal_check_zero(ltime, fuzzydate) ||
          check_fuzzy_date(*ltime, fuzzydate);
 }
 
-int Field_newdate::cmp(const uchar *a_ptr, const uchar *b_ptr) const {
+int Field_date::cmp(const uchar *a_ptr, const uchar *b_ptr) const {
   uint32 a, b;
   a = uint3korr(a_ptr);
   b = uint3korr(b_ptr);
   return (a < b) ? -1 : (a > b) ? 1 : 0;
 }
 
-size_t Field_newdate::make_sort_key(uchar *to, size_t length) const {
+size_t Field_date::make_sort_key(uchar *to, size_t length) const {
   memset(to, 0, length);
   to[0] = ptr[2];
   to[1] = ptr[1];
@@ -6004,7 +6005,7 @@ size_t Field_newdate::make_sort_key(uchar *to, size_t length) const {
   return 3;
 }
 
-void Field_newdate::sql_type(String &res) const {
+void Field_date::sql_type(String &res) const {
   res.set_ascii(STRING_WITH_LEN("date"));
 }
 
@@ -6135,8 +6136,9 @@ int Field_datetime::cmp(const uchar *a_ptr, const uchar *b_ptr) const {
     a = longlongget(a_ptr);
     b = longlongget(b_ptr);
   }
-  return ((ulonglong)a < (ulonglong)b) ? -1
-                                       : ((ulonglong)a > (ulonglong)b) ? 1 : 0;
+  return ((ulonglong)a < (ulonglong)b)   ? -1
+         : ((ulonglong)a > (ulonglong)b) ? 1
+                                         : 0;
 }
 
 size_t Field_datetime::make_sort_key(uchar *to, size_t length) const {
@@ -6249,7 +6251,8 @@ type_conversion_status Field_datetimef::store_packed(longlong nr) {
                                      the source string
   @param  end                        end of the source string
   @param  count_spaces               treat trailing spaces as important data
-  @param  cs                         character set of the string
+  @param  from_cs                    character set of the source string
+  @param  to_cs                      character set of the target string
 
   @return TYPE_OK, TYPE_NOTE_TRUNCATED, TYPE_WARN_TRUNCATED,
           TYPE_WARN_INVALID_STRING
@@ -6259,7 +6262,7 @@ type_conversion_status Field_datetimef::store_packed(longlong nr) {
 type_conversion_status Field_longstr::check_string_copy_error(
     const char *well_formed_error_pos, const char *cannot_convert_error_pos,
     const char *from_end_pos, const char *end, bool count_spaces,
-    const CHARSET_INFO *cs) {
+    const CHARSET_INFO *from_cs, const CHARSET_INFO *to_cs) {
   const char *pos;
   char tmp[32];
   THD *thd = current_thd;
@@ -6267,16 +6270,22 @@ type_conversion_status Field_longstr::check_string_copy_error(
   if (!(pos = well_formed_error_pos) && !(pos = cannot_convert_error_pos))
     return report_if_important_data(from_end_pos, end, count_spaces);
 
-  convert_to_printable(tmp, sizeof(tmp), pos, (end - pos), cs, 6);
+  convert_to_printable(tmp, sizeof(tmp), pos, (end - pos), from_cs, 6);
 
-  push_warning_printf(
-      thd, Sql_condition::SL_WARNING, ER_TRUNCATED_WRONG_VALUE_FOR_FIELD,
-      ER_THD(thd, ER_TRUNCATED_WRONG_VALUE_FOR_FIELD), "string", tmp,
-      field_name, thd->get_stmt_da()->current_row_for_condition());
+  if (table->m_charset_conversion_is_strict) {
+    my_error(ER_CANNOT_CONVERT_STRING, MYF(0), tmp, from_cs->csname,
+             to_cs->csname);
+    return TYPE_ERR_BAD_VALUE;
+  } else {
+    push_warning_printf(
+        thd, Sql_condition::SL_WARNING, ER_TRUNCATED_WRONG_VALUE_FOR_FIELD,
+        ER_THD(thd, ER_TRUNCATED_WRONG_VALUE_FOR_FIELD), "string", tmp,
+        field_name, thd->get_stmt_da()->current_row_for_condition());
 
-  if (well_formed_error_pos != nullptr) return TYPE_WARN_INVALID_STRING;
+    if (well_formed_error_pos != nullptr) return TYPE_WARN_INVALID_STRING;
 
-  return TYPE_WARN_TRUNCATED;
+    return TYPE_WARN_TRUNCATED;
+  }
 }
 
 /*
@@ -6349,7 +6358,7 @@ type_conversion_status Field_string::store(const char *from, size_t length,
 
   return check_string_copy_error(well_formed_error_pos,
                                  cannot_convert_error_pos, from_end_pos,
-                                 from + length, false, cs);
+                                 from + length, false, cs, field_charset);
 }
 
 /**
@@ -6790,7 +6799,7 @@ type_conversion_status Field_varstring::store(const char *from, size_t length,
 
   return check_string_copy_error(well_formed_error_pos,
                                  cannot_convert_error_pos, from_end_pos,
-                                 from + length, true, cs);
+                                 from + length, true, cs, field_charset);
 }
 
 type_conversion_status Field_varstring::store(longlong nr, bool unsigned_val) {
@@ -7269,7 +7278,7 @@ type_conversion_status Field_blob::store_internal(const char *from,
     store_ptr_and_length(tmp, copy_length);
     return check_string_copy_error(well_formed_error_pos,
                                    cannot_convert_error_pos, from_end_pos,
-                                   from + length, true, cs);
+                                   from + length, true, cs, field_charset);
   }
 
 oom_error:
@@ -7743,6 +7752,11 @@ uint Field_blob::is_equal(const Create_field *new_field) const {
   }
 
   return IS_EQUAL_PACK_LENGTH;
+}
+
+bool Field_vector::eq_def(const Field *field) const {
+  return Field::eq_def(field) &&
+         (max_data_length() == field->max_data_length());
 }
 
 uint Field_vector::is_equal(const Create_field *new_field) const {
@@ -9800,7 +9814,7 @@ Field *make_field(MEM_ROOT *mem_root, TABLE_SHARE *share, uchar *ptr,
           Field_year(ptr, null_pos, null_bit, auto_flags, field_name);
     case MYSQL_TYPE_NEWDATE:
       return new (mem_root)
-          Field_newdate(ptr, null_pos, null_bit, auto_flags, field_name);
+          Field_date(ptr, null_pos, null_bit, auto_flags, field_name);
 
     case MYSQL_TYPE_TIME:
       return new (mem_root)
@@ -10302,12 +10316,12 @@ int Field_typed_array::key_cmp(const uchar *key_ptr, uint key_length) const {
   m_conv_item->field->set_key_image(key_ptr, key_length);
   if (sql_scalar_to_json(m_conv_item, "<Field_typed_array::key_cmp>", &value,
                          &tmp, &key, nullptr, true)) {
-    return -1;
+    return 1;
   }
 
   // Compare colum value with the key.
   if (val_json(&col_val)) {
-    return -1;
+    return 1;
   }
   assert(col_val.type() == enum_json_type::J_ARRAY);
   for (uint i = 0; i < col_val.length(); i++) {
@@ -10316,7 +10330,7 @@ int Field_typed_array::key_cmp(const uchar *key_ptr, uint key_length) const {
       return 0;
     }
   }
-  return -1;
+  return 1;
 }
 
 void Field_typed_array::init(TABLE *table_arg) {
@@ -10771,7 +10785,7 @@ Create_field *generate_create_field(THD *thd, Item *source_item,
     Field *default_field;
     tmp_table_field = create_tmp_field(
         thd, tmp_table, source_item, source_item->type(), nullptr, &from_field,
-        &default_field, false, false, false, false);
+        &default_field, false, false, false);
   }
   if (!tmp_table_field) return nullptr; /* purecov: inspected */
 

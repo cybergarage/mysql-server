@@ -25,6 +25,7 @@ INCLUDE(GenerateExportHeader)
 
 ADD_LIBRARY(sql_lexer STATIC
   sql_lexer.cc
+  sql_lexer_thd.cc
   ${CMAKE_SOURCE_DIR}/sql/sql_lex_hash.cc
   )
 TARGET_INCLUDE_DIRECTORIES(sql_lexer
@@ -68,10 +69,9 @@ ROUTER_ADD_SHARED_LIBRARY(routing
   mysql_routing.cc
   destination.cc
   destination_error.cc
+  destinations_option_parser.cc
   dest_metadata_cache.cc
-  dest_first_available.cc
-  dest_next_available.cc
-  dest_round_robin.cc
+  dest_static.cc
   context.cc
   mysql_routing_common.cc
   connection_container.cc
@@ -82,6 +82,7 @@ ROUTER_ADD_SHARED_LIBRARY(routing
   x_connection.cc
   connection.cc
   blocked_endpoints.cc
+  routing_guidelines_adapter.cc
 
   await_client_or_server.cc
   forwarding_processor.cc
@@ -103,6 +104,7 @@ ROUTER_ADD_SHARED_LIBRARY(routing
   classic_auth_caching_sha2_forwarder.cc
   classic_auth_forwarder.cc
   classic_auth_native_forwarder.cc
+  classic_auth_openid_connect_forwarder.cc
   classic_auth_sha256_password_forwarder.cc
   classic_binlog_dump_forwarder.cc
   classic_change_user_forwarder.cc
@@ -130,6 +132,7 @@ ROUTER_ADD_SHARED_LIBRARY(routing
   classic_auth_cleartext_sender.cc
   classic_auth_caching_sha2_sender.cc
   classic_auth_native_sender.cc
+  classic_auth_openid_connect_sender.cc
   classic_auth_sha256_password_sender.cc
   classic_change_user_sender.cc
   # classic_greeting_sender.cc
@@ -171,6 +174,7 @@ ROUTER_ADD_SHARED_LIBRARY(routing
   connection_pool
   destination_status
   sql_lexer
+  routing_guidelines
   )
 
 IF(SOLARIS)

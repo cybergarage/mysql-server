@@ -46,7 +46,8 @@
 #include "sql/conn_handler/connection_handler_manager.h"
 #include "sql/current_thd.h"  // current_thd
 #include "sql/handler.h"
-#include "sql/mysqld.h"  // key_thread_one_connection
+#include "sql/mysqld.h"              // key_thread_one_connection
+#include "sql/mysqld_thd_manager.h"  // Global_THD_manager
 #include "sql/protocol_classic.h"
 #include "sql/query_options.h"
 #include "sql/resourcegroups/platform/thread_attrs_api.h"  // num_vcpus
@@ -255,6 +256,7 @@ uint thd_get_net_read_write(THD *thd) {
 
 void thd_set_net_read_write(THD *thd, uint val) {
   thd->get_protocol_classic()->get_net()->reading_or_writing = val;
+  thd->store_cached_properties(THD::cached_properties::RW_STATUS);
 }
 
 /**
@@ -311,6 +313,14 @@ my_thread_attr_t *get_connection_attrib() { return &connection_attrib; }
 */
 
 ulong get_max_connections() { return max_connections; }
+
+longlong get_incoming_connects() {
+  return Connection_handler_manager::get_incoming_connects();
+}
+
+longlong get_aborted_connects() {
+  return Connection_handler_manager::get_instance()->aborted_connects();
+}
 
 //////////////////////////////////////////////////////////
 //

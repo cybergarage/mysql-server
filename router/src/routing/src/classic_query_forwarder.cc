@@ -23,6 +23,8 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+// enable using Rapidjson library with std::string
+
 #include "classic_query_forwarder.h"
 
 #include <charconv>
@@ -35,9 +37,9 @@
 #include <system_error>
 #include <variant>
 
-#define RAPIDJSON_HAS_STDSTRING 1
-
+#ifdef RAPIDJSON_NO_SIZETYPEDEFINE
 #include "my_rapidjson_size_t.h"
+#endif
 
 #include <rapidjson/document.h>
 #include <rapidjson/prettywriter.h>
@@ -47,7 +49,6 @@
 #include "classic_lazy_connect.h"
 #include "classic_query_param.h"
 #include "classic_query_sender.h"
-#include "classic_quit_sender.h"
 #include "classic_session_tracker.h"
 #include "command_router_set.h"
 #include "harness_assert.h"
@@ -55,6 +56,7 @@
 #include "implicit_commit_parser.h"
 #include "my_sys.h"  // get_charset_by_name
 #include "mysql/harness/stdx/expected.h"
+#include "mysql/harness/string_utils.h"  // ieq
 #include "mysql/harness/tls_error.h"
 #include "mysql/harness/utility/string.h"
 #include "mysqld_error.h"  // mysql errors
@@ -109,16 +111,6 @@ std::string string_from_timepoint(
       // cast to long int as it is "longlong" on 32bit, and "long" on
       // 64bit platforms, but we only have a range of 0-999
       static_cast<long int>(usec.count()));
-}
-
-bool ieq(const std::string_view &a, const std::string_view &b) {
-  return std::equal(a.begin(), a.end(), b.begin(), b.end(),
-                    [](char lhs, char rhs) {
-                      auto ascii_tolower = [](char c) {
-                        return c >= 'A' && c <= 'Z' ? c | 0x20 : c;
-                      };
-                      return ascii_tolower(lhs) == ascii_tolower(rhs);
-                    });
 }
 
 #ifdef DEBUG_DUMP_TOKENS
@@ -806,8 +798,8 @@ class Name_string {
     /*
      * charset of system-variables
      */
-    static const CHARSET_INFO *system_charset_info =
-        &my_charset_utf8mb3_general_ci;
+    // 33 = my_charset_utf8mb3_general_ci
+    static const CHARSET_INFO *system_charset_info = get_charset(33, 0);
 
     return 0 == my_strcasecmp(system_charset_info, name_, rhs);
   }
@@ -879,11 +871,11 @@ stdx::expected<void, std::error_code> execute_command_router_set_access_mode(
         -> stdx::expected<
             std::optional<ClientSideClassicProtocolState::AccessMode>,
             std::string> {
-      if (ieq(v, "read_write")) {
+      if (mysql_harness::ieq(v, "read_write")) {
         return ClientSideClassicProtocolState::AccessMode::ReadWrite;
-      } else if (ieq(v, "read_only")) {
+      } else if (mysql_harness::ieq(v, "read_only")) {
         return ClientSideClassicProtocolState::AccessMode::ReadOnly;
-      } else if (ieq(v, "auto")) {
+      } else if (mysql_harness::ieq(v, "auto")) {
         return std::nullopt;
       } else {
         return stdx::unexpected("Expected 'read_write', 'read_only' or 'auto'");
@@ -1215,12 +1207,12 @@ class InterceptedStatementsParser : public ShowWarningsParser {
         }
       }
     } else if (auto tkn = accept(IDENT)) {
-      if (ieq(tkn.text(), "router")) {       // ROUTER
-        if (accept(SET_SYM)) {               // SET
-          if (auto name_tkn = ident()) {     // <name>
-            if (accept(EQ)) {                // =
-              if (auto val = value()) {      // <value>
-                if (accept(END_OF_INPUT)) {  // $
+      if (mysql_harness::ieq(tkn.text(), "router")) {  // ROUTER
+        if (accept(SET_SYM)) {                         // SET
+          if (auto name_tkn = ident()) {               // <name>
+            if (accept(EQ)) {                          // =
+              if (auto val = value()) {                // <value>
+                if (accept(END_OF_INPUT)) {            // $
                   return ret_type{std::in_place,
                                   CommandRouterSet(name_tkn.text(), *val)};
                 } else {
@@ -1898,8 +1890,7 @@ QueryForwarder::explicit_commit_connect() {
 
 stdx::expected<Processor::Result, std::error_code>
 QueryForwarder::explicit_commit_connect_done() {
-  auto &server_conn = connection()->server_conn();
-  if (!server_conn.is_open()) {
+  if (reconnect_error().error_code() != 0) {
     auto &src_conn = connection()->client_conn();
 
     discard_current_msg(src_conn);
@@ -2493,6 +2484,13 @@ QueryForwarder::classify_query() {
   if (connection()->connection_sharing_allowed() &&
       // only switch backends if access-mode is 'auto'
       connection()->context().access_mode() == routing::AccessMode::kAuto) {
+    if (connection()->expected_server_mode() ==
+        mysqlrouter::ServerMode::Unavailable) {
+      connection()->expected_server_mode(
+          want_read_only_connection ? mysqlrouter::ServerMode::ReadOnly
+                                    : mysqlrouter::ServerMode::ReadWrite);
+    }
+
     if ((want_read_only_connection && connection()->expected_server_mode() ==
                                           mysqlrouter::ServerMode::ReadWrite) ||
         (!want_read_only_connection && connection()->expected_server_mode() ==
@@ -2539,7 +2537,10 @@ stdx::expected<Processor::Result, std::error_code> QueryForwarder::connect() {
         std::string(connection()->expected_server_mode() ==
                             mysqlrouter::ServerMode::ReadOnly
                         ? "ro"
-                        : "rw-or-nothing")));
+                        : (connection()->expected_server_mode() ==
+                                   mysqlrouter::ServerMode::ReadWrite
+                               ? "rw-or-nothing"
+                               : "undefined"))));
   }
 
   stage(Stage::Connected);
@@ -2547,8 +2548,7 @@ stdx::expected<Processor::Result, std::error_code> QueryForwarder::connect() {
 }
 
 stdx::expected<Processor::Result, std::error_code> QueryForwarder::connected() {
-  auto &server_conn = connection()->server_conn();
-  if (!server_conn.is_open()) {
+  if (reconnect_error().error_code() != 0) {
     auto &src_conn = connection()->client_conn();
 
     // take the client::command from the connection.

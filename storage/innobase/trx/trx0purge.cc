@@ -65,6 +65,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0roll.h"
 #include "trx0rseg.h"
 #include "trx0trx.h"
+#include "ut0math.h"
 
 /** Maximum allowable purge history length.  <=0 means 'infinite'. */
 ulong srv_max_purge_lag = 0;
@@ -765,7 +766,7 @@ bool Tablespace::needs_truncation() {
 /** Change the space_id from its current value.
 @param[in]  space_id  The new undo tablespace ID */
 void Tablespace::set_space_id(space_id_t space_id) {
-  ut_ad(m_num == id2num(space_id));
+  ut_ad_eq(num(), id2num(space_id));
   m_id = space_id;
 }
 
@@ -843,9 +844,6 @@ void Tablespace::set_file_name(const char *file_name) {
   Fil_path::normalize(norm_fn);
   std::string tmp_fn{norm_fn};
 
-  /* Explicit undo tablespaces use an IBU extension. */
-  m_implicit = (Fil_path::has_suffix(IBU, tmp_fn) ? false : true);
-
   /* This name can come in three forms: absolute path, relative path,
   and basename. ADD DATAFILE for undo tablespaces does not accept a
   relative path. If a relative path comes in here, it was the scanned
@@ -904,7 +902,7 @@ void Tablespace::alter_active() {
   if (m_rsegs->is_empty()) {
     m_rsegs->set_active();
   } else if (m_rsegs->is_inactive_explicit()) {
-    if (purge_sys->undo_trunc.get_marked_space_num() == m_num) {
+    if (purge_sys->undo_trunc.get_marked_space_num() == num()) {
       m_rsegs->set_inactive_implicit();
     } else {
       m_rsegs->set_active();
@@ -952,7 +950,7 @@ dberr_t start_logging(Tablespace *undo_space) {
   bool ret;
   pfs_os_file_t handle =
       os_file_create(innodb_log_file_key, log_file_name, OS_FILE_CREATE,
-                     OS_FILE_NORMAL, OS_LOG_FILE, srv_read_only_mode, &ret);
+                     OS_LOG_FILE, srv_read_only_mode, &ret);
   if (!ret) {
     return (DB_IO_ERROR);
   }
@@ -2102,8 +2100,7 @@ std::size_t Purge_groups_t::find_smallest_group() {
 
 std::ostream &Purge_groups_t::print(std::ostream &out) const {
   const std::size_t n_purge_threads = m_groups.size();
-  const std::size_t max_n =
-      (m_total_rec + n_purge_threads - 1) / n_purge_threads;
+  const std::size_t max_n = ut::div_ceil(m_total_rec, n_purge_threads);
   const std::size_t min_n =
       (max_n > n_purge_threads) ? max_n - n_purge_threads : 0;
 
@@ -2122,8 +2119,7 @@ std::ostream &Purge_groups_t::print(std::ostream &out) const {
 #ifdef UNIV_DEBUG
 bool Purge_groups_t::is_grouping_uniform() const {
   const std::size_t n_purge_threads = m_groups.size();
-  const std::size_t max_n =
-      (m_total_rec + n_purge_threads - 1) / n_purge_threads;
+  const std::size_t max_n = ut::div_ceil(m_total_rec, n_purge_threads);
   const std::size_t min_n =
       (max_n > n_purge_threads) ? max_n - n_purge_threads : 0;
   bool result = true;
@@ -2140,8 +2136,7 @@ bool Purge_groups_t::is_grouping_uniform() const {
 
 void Purge_groups_t::distribute() {
   const std::size_t n_purge_threads = m_groups.size();
-  const std::size_t max_n =
-      (m_total_rec + n_purge_threads - 1) / n_purge_threads;
+  const std::size_t max_n = ut::div_ceil(m_total_rec, n_purge_threads);
 
   for (std::size_t i = 0; i < 2; ++i) {
     bool need_second_pass = false;

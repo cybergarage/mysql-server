@@ -27,6 +27,15 @@
 
 #include <gtest/gtest.h>
 
+#define RAPIDJSON_HAS_STDSTRING 1
+
+#include "my_rapidjson_size_t.h"
+
+#include <rapidjson/document.h>
+#include <rapidjson/rapidjson.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+
 #include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/stdx/expected_ostream.h"
 #include "mysqlrouter/utils.h"  // copy_file
@@ -185,6 +194,10 @@ void SharedServer::spawn_server_with_datadir(
 
   std::string log_file_name = "mysqld-" + std::to_string(starts_) + ".err";
 
+  // set the socket-path's in the datadir.
+  classic_socket_dest_ = {Path(datadir).join("mysql.sock").str()};
+  x_socket_dest_ = {Path(datadir).join("mysqlx.sock").str()};
+
   std::vector<std::string> args{
       "--no-defaults",  //
       "--lc-messages-dir=" + lc_messages_dir.str(),
@@ -192,12 +205,10 @@ void SharedServer::spawn_server_with_datadir(
       "--plugin_dir=" + plugindir.str(),  //
       "--log-error=" + datadir + mysql_harness::Path::directory_separator +
           log_file_name,
-      "--port=" + std::to_string(server_port_),
-      // defaults to {datadir}/mysql.socket
-      "--socket=" + Path(datadir).join("mysql.sock").str(),
-      "--mysqlx-port=" + std::to_string(server_mysqlx_port_),
-      // defaults to {datadir}/mysqlx.socket
-      "--mysqlx-socket=" + Path(datadir).join("mysqlx.sock").str(),
+      "--port=" + std::to_string(classic_tcp_destination().port()),
+      "--socket=" + classic_socket_destination().path(),
+      "--mysqlx-port=" + std::to_string(x_tcp_destination().port()),
+      "--mysqlx-socket=" + x_socket_destination().path(),
       // disable LOAD DATA/SELECT INTO on the server
       "--secure-file-priv=NULL",          //
       "--innodb_redo_log_capacity=8M",    // fast startups
@@ -228,8 +239,8 @@ void SharedServer::spawn_server_with_datadir(
 
 #ifdef _WIN32
   // on windows, wait until port is ready as there is no notify-socket.
-  if (!(wait_for_port_ready(server_port_, 10s) &&
-        wait_for_port_ready(server_mysqlx_port_, 10s))) {
+  if (!(wait_for_port_ready(classic_tcp_destination().port(), 10s) &&
+        wait_for_port_ready(x_tcp_destination().port(), 10s))) {
     mysqld_failed_to_start_ = true;
   }
 #endif
@@ -257,7 +268,9 @@ stdx::expected<MysqlClient, MysqlError> SharedServer::admin_cli() {
   cli.username(account.username);
   cli.password(account.password);
 
-  auto connect_res = cli.connect(server_host(), server_port());
+  auto tcp_dest = classic_tcp_destination();
+
+  auto connect_res = cli.connect(tcp_dest.hostname(), tcp_dest.port());
   if (!connect_res) return stdx::unexpected(connect_res.error());
 
   return cli;
@@ -299,9 +312,16 @@ void SharedServer::grant_access(MysqlClient &cli, const Account &account,
 }
 
 void SharedServer::create_account(MysqlClient &cli, Account account) {
-  const std::string q = "CREATE USER " + account.username + " " +         //
-                        "IDENTIFIED WITH " + account.auth_method + " " +  //
-                        "BY '" + account.password + "'";
+  std::string q = "CREATE USER " + account.username + " " +  //
+                  "IDENTIFIED WITH " + account.auth_method;
+
+  if (!account.password.empty()) {
+    q += " BY '" + account.password + "'";
+  }
+
+  if (account.identified_as) {
+    q += " AS '" + *account.identified_as + "'";
+  }
 
   SCOPED_TRACE("// " + q);
   ASSERT_NO_ERROR(cli.query(q)) << q;
@@ -314,12 +334,30 @@ void SharedServer::drop_account(MysqlClient &cli, Account account) {
   ASSERT_NO_ERROR(cli.query(q)) << q;
 }
 
-void SharedServer::setup_mysqld_accounts() {
-  auto cli_res = admin_cli();
-  ASSERT_NO_ERROR(cli_res);
+stdx::expected<void, MysqlError> SharedServer::local_set_openid_connect_config(
+    MysqlClient &cli) {
+  std::string set_openid_connect_config(R"(
+{ "myissuer" : "{\"kid\":\"6f7254101f56e41cf35c9926de84a2d552b4c6f1\",\"e\":\"AQAB\",\"name\":\"https://myissuer.com\",\"alg\":\"RS256\",\"use\":\"sig\",\"n\":\"oEpcwfsGjBWzWanhb-WNGy4NgPFXOztLiZOZUWFZh25Vgny0YIlVPwtNRqqXgiyvVYzp-uMD7noQl8FUkqNM22NgjpzOWZAcIwc103qxgNr_kIV8__5uDu-ppl5qnHIEYP_IW9_uBpzJ_L2oZjv-AoSCvHiIFpcg9lq5gxKVe9A8FuCGfQ2rodlYqUC2qha0CTwgbUIT9H3469gpoU88AXiHDC90Dsi8Wpa5D1aNGJ8VbPl9CzyMWp-evHmtfDzNzz9yKF7JKExU6pBjG9HsQ0CEW9_8LtQ6NZrt6o3pQoMm8gjUScrUJnrfN16k0q8hfFuewQi5syV0GBlPg6en1w\",\"kty\":\"RSA\"}", "authService.oracle.com": "{\"alg\":\"RS256\",\"use\":\"sig\",\"kty\":\"RSA\",\"e\":\"AQAB\",\"kid\":\"967ea044-88bc-47d7-b286-52b87d0f08a5\",\"n\":\"nSfpzwAHkXy7NPxAh_SyLklu_l1d1hYhWjWl35HIeKMtvlr5oYWAGpbB19EMrkdCcxrXH8kIMhQ9rbmnn9BtaiQ6qbhQgPhBjJfq7k9-csn-qHWpNbALpLY5EuF7ZJQr-Ith13iEAG_qXoapDesWYwBNHDG6muKKeVYdiLc_AsP4CXYtt1emHKIt1zEqFFBJo2tiooXf_oRvC9d_U5lWU0NiSz6yT8z9-4g7XrdDtETmkL--EJLzhywIItuRTykkxPOWOCesSz1BQWcS6y0oTVKE5FNpUCWydvvzataERq5jHd61HbTKw0casV9Lod5MwGFG1dIDk7x8qt0ptOBleQ\"}" }
+)");
 
-  auto cli = std::move(cli_res.value());
+  return SharedServer::local_set_openid_connect_config(
+      cli, set_openid_connect_config);
+}
 
+stdx::expected<void, MysqlError> SharedServer::local_set_openid_connect_config(
+    MysqlClient &cli, const std::string &openid_connect_config) {
+  std::string set_openid_connect_config_stmt(
+      "SET GLOBAL authentication_openid_connect_configuration = \"JSON://" +
+      cli.escape(openid_connect_config) + "\"");
+
+  auto query_res = cli.query(set_openid_connect_config_stmt);
+
+  if (!query_res) return stdx::unexpected(query_res.error());
+
+  return {};
+}
+
+void SharedServer::setup_mysqld_accounts(MysqlClient &cli) {
   create_schema(cli, "testing");
 
   ASSERT_NO_ERROR(cli.query(R"(CREATE PROCEDURE testing.multiple_results()
@@ -328,7 +366,7 @@ BEGIN
   SELECT 2;
 END)"));
 
-  for (auto account : {
+  for (const auto &account : {
            caching_sha2_password_account(),
            caching_sha2_empty_password_account(),
            sha256_password_account(),
@@ -371,18 +409,15 @@ END)"));
                 "         SONAME 'version_token" SO_EXTENSION "'"));
 }
 
-void SharedServer::install_plugins() {
-  SCOPED_TRACE("// install plugins");
-  auto cli_res = admin_cli();
-  ASSERT_NO_ERROR(cli_res);
+stdx::expected<void, MysqlError> SharedServer::local_install_plugin(
+    MysqlClient &cli, const std::string &plugin_name,
+    const std::string &so_name) {
+  auto query_res = cli.query("INSTALL PLUGIN " + plugin_name +
+                             "        SONAME '" + so_name + SO_EXTENSION "'");
 
-  install_plugins(*cli_res);
-}
+  if (!query_res) return stdx::unexpected(query_res.error());
 
-void SharedServer::install_plugins(MysqlClient &cli) {
-  ASSERT_NO_ERROR(
-      cli.query("INSTALL PLUGIN clone"
-                "        SONAME 'mysql_clone" SO_EXTENSION "'"));
+  return {};
 }
 
 void SharedServer::flush_privileges() {
@@ -412,14 +447,16 @@ SharedServer::user_connection_ids(MysqlClient &cli,
   }
 
   auto ids_res = cli.query(
-      "SELECT id FROM performance_schema.processlist WHERE id != "
-      "CONNECTION_ID() AND User IN (" +
+      "SELECT id FROM performance_schema.processlist "
+      "WHERE id != CONNECTION_ID() "
+      "  AND state NOT LIKE 'Group Replication%%' "
+      "  AND User IN (" +
       oss.str() + ")");
   if (!ids_res) return stdx::unexpected(ids_res.error());
 
   std::vector<uint64_t> ids;
   for (const auto &res : *ids_res) {
-    for (auto row : res.rows()) {
+    for (const auto *row : res.rows()) {
       ids.push_back(strtol(row[0], nullptr, 10));
     }
   }

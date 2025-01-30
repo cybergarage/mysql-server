@@ -909,8 +909,6 @@ Log_handle log_buffer_reserve(log_t &log, size_t len) {
 #ifdef UNIV_DEBUG
   if (!recv_recovery_is_on()) {
     log_background_threads_active_validate(log);
-  } else {
-    ut_a(!recv_no_ibuf_operations);
   }
 #endif
 
@@ -1189,10 +1187,6 @@ void log_buffer_flush_to_disk(log_t &log, bool sync) {
   /* Google's patch introduced log_buffer_sync_in_background which was calling
   log_write_up_to, and this is the left-over from that. */
   log_write_up_to(log, lsn, sync);
-}
-
-void log_buffer_flush_to_disk(bool sync) {
-  log_buffer_flush_to_disk(*log_sys, sync);
 }
 
 void log_buffer_sync_in_background() {

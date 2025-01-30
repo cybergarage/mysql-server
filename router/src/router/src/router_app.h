@@ -42,7 +42,7 @@
 #include "mysqlrouter/sys_user_operations.h"
 
 #include <cstdint>
-#include <iostream>
+#include <iostream>  // cerr, cout
 #include <stdexcept>
 #include <vector>
 
@@ -455,7 +455,7 @@ class MySQLRouter {
 
   void bootstrap(const std::string &program_name,
                  const std::string &metadata_server_uri,
-                 const std::string &plugin_folder = "");
+                 const std::string &plugin_folder);
 
   /*
    * @brief returns id of the router.
@@ -471,21 +471,21 @@ class MySQLRouter {
   /**
    * @brief Initializes keyring using master-key-reader and master-key-writer.
    *
-   * @throw MasterKeyReadError
+   * @throw MasterKeyReadError On error.
    */
   void init_keyring_using_external_facility(mysql_harness::Config &config);
 
   /**
    * @brief Initializes keyring using master key file.
    *
-   * @throw std::runtime_error
+   * @throw std::runtime_error On error.
    */
   void init_keyring_using_master_key_file();
 
   /**
    * @brief Initializes keyring using password read from STDIN.
    *
-   * @throw std::runtime_error
+   * @throw std::runtime_error On error.
    */
   void init_keyring_using_prompted_password();
 

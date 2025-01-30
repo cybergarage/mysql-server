@@ -36,6 +36,12 @@
 #include "ndb_global.h"
 #include "ndb_version.h"
 
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <unistd.h>
+#endif
+
 static constexpr const char *JarSrcPath =
     "storage" DIR_SEPARATOR "ndb" DIR_SEPARATOR "clusterj" DIR_SEPARATOR;
 
@@ -118,18 +124,10 @@ bool write_properties(const char *connStr, const char *mysqlStr) {
   if (!fp) return false;
   fprintf(fp,
           "com.mysql.clusterj.connectstring=%s\n"
-          "com.mysql.clusterj.connect.retries=4\n"
-          "com.mysql.clusterj.connect.delay=5\n"
-          "com.mysql.clusterj.connect.verbose=1\n"
-          "com.mysql.clusterj.connect.timeout.before=30\n"
-          "com.mysql.clusterj.connect.timeout.after=20\n"
           "com.mysql.clusterj.jdbc.url=jdbc:mysql://%s/test\n"
           "com.mysql.clusterj.jdbc.driver=com.mysql.cj.jdbc.Driver\n"
           "com.mysql.clusterj.jdbc.username=root\n"
           "com.mysql.clusterj.jdbc.password=\n"
-          "com.mysql.clusterj.username=\n"
-          "com.mysql.clusterj.password=\n"
-          "com.mysql.clusterj.database=test\n"
           "com.mysql.clusterj.max.transactions=1024\n",
           connStr, mysqlStr);
   fclose(fp);
@@ -195,6 +193,8 @@ int run_tests(int argc, char **argv) {
   args.add("-Djava.library.path=", ndbClientDir.c_str());
   args.add("-Dclusterj.properties=", paths.propsFile().c_str());
   args.add("-Duser.timezone=GMT-3");
+  args.add("-ea");
+  if (getenv("LOG_GC")) args.add("-Xlog:gc=trace:file=clusterj-%p-gc.log");
   args.add2("-cp", classpath.c_str());
   args.add("testsuite.clusterj.AllTests");
   args.add(clusterjTestJar.c_str());

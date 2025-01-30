@@ -79,7 +79,7 @@ FUNCTION(add_harness_plugin NAME)
   ENDIF()
 
   IF(NOT _option_NO_INSTALL)
-    ADD_VERSION_INFO(${NAME} SHARED _option_SOURCES Router)
+    ADD_VERSION_INFO(SHARED _option_SOURCES Router)
   ENDIF()
 
   # Add the library and ensure that the name is good for the plugin
@@ -89,6 +89,9 @@ FUNCTION(add_harness_plugin NAME)
   # .dylib, which we do not want, so we reset it here.
   ADD_LIBRARY(${NAME} SHARED ${_option_SOURCES})
   TARGET_COMPILE_FEATURES(${NAME} PUBLIC cxx_std_20)
+  IF(APPLE)
+    TARGET_LINK_OPTIONS(${NAME} PRIVATE LINKER:-no_warn_duplicate_libraries)
+  ENDIF()
 
   # add plugin to build-all target
   ADD_DEPENDENCIES(mysqlrouter_all ${NAME})

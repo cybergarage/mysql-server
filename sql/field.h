@@ -58,9 +58,9 @@
 #include "sql/sql_const.h"
 #include "sql/sql_error.h"  // Sql_condition
 #include "sql/table.h"
-#include "sql/vector_conversion.h"  // get_dimensions
-#include "sql_string.h"             // String
+#include "sql_string.h"  // String
 #include "template_utils.h"
+#include "vector-common/vector_constants.h"  // max_dimensions
 
 class Create_field;
 class CostOfItem;
@@ -78,7 +78,7 @@ class Field_long;
 class Field_longlong;
 class Field_medium;
 class Field_new_decimal;
-class Field_newdate;
+class Field_date;
 class Field_num;
 class Field_real;
 class Field_set;
@@ -162,7 +162,7 @@ Field (abstract)
    |  +--Field_timef
    |
    +--Field_temporal_with_date (abstract)
-      +--Field_newdate
+      +--Field_date
       +--Field_temporal_with_date_and_time (abstract)
          +--Field_timestamp
          +--Field_datetime
@@ -2054,7 +2054,7 @@ class Field_longstr : public Field_str {
   type_conversion_status check_string_copy_error(
       const char *well_formed_error_pos, const char *cannot_convert_error_pos,
       const char *from_end_pos, const char *end, bool count_spaces,
-      const CHARSET_INFO *cs);
+      const CHARSET_INFO *from_cs, const CHARSET_INFO *to_cs);
 
  public:
   Field_longstr(uchar *ptr_arg, uint32 len_arg, uchar *null_ptr_arg,
@@ -2715,7 +2715,7 @@ class Field_temporal : public Field {
 
     Flags depend on the session sql_mode settings, such as
     MODE_NO_ZERO_DATE, MODE_NO_ZERO_IN_DATE.
-    Also, Field_newdate, Field_datetime, Field_datetimef add TIME_FUZZY_DATE
+    Also, Field_date, Field_datetime, Field_datetimef add TIME_FUZZY_DATE
     to the session sql_mode settings, to allow relaxed date format,
     while Field_timestamp, Field_timestampf do not.
 
@@ -3132,7 +3132,7 @@ class Field_year final : public Field_tiny {
   }
 };
 
-class Field_newdate : public Field_temporal_with_date {
+class Field_date : public Field_temporal_with_date {
  protected:
   static const int PACK_LENGTH = 3;
   my_time_flags_t date_flags(const THD *thd) const final;
@@ -3141,12 +3141,12 @@ class Field_newdate : public Field_temporal_with_date {
                                         int *error) final;
 
  public:
-  Field_newdate(uchar *ptr_arg, uchar *null_ptr_arg, uchar null_bit_arg,
-                uchar auto_flags_arg, const char *field_name_arg)
+  Field_date(uchar *ptr_arg, uchar *null_ptr_arg, uchar null_bit_arg,
+             uchar auto_flags_arg, const char *field_name_arg)
       : Field_temporal_with_date(ptr_arg, null_ptr_arg, null_bit_arg,
                                  auto_flags_arg, field_name_arg, MAX_DATE_WIDTH,
                                  0) {}
-  Field_newdate(bool is_nullable_arg, const char *field_name_arg)
+  Field_date(bool is_nullable_arg, const char *field_name_arg)
       : Field_temporal_with_date(nullptr,
                                  is_nullable_arg ? &dummy_null_buffer : nullptr,
                                  0, NONE, field_name_arg, MAX_DATE_WIDTH, 0) {}
@@ -3166,10 +3166,10 @@ class Field_newdate : public Field_temporal_with_date {
   void sql_type(String &str) const final;
   bool zero_pack() const final { return true; }
   bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) const final;
-  Field_newdate *clone(MEM_ROOT *mem_root) const final {
+  Field_date *clone(MEM_ROOT *mem_root) const final {
     assert(type() == MYSQL_TYPE_DATE);
     assert(real_type() == MYSQL_TYPE_NEWDATE);
-    return new (mem_root) Field_newdate(*this);
+    return new (mem_root) Field_date(*this);
   }
 };
 
@@ -3704,9 +3704,10 @@ class Field_blob : public Field_longstr {
         m_keep_old_value(false) {
     set_flag(BLOB_FLAG);
     if (set_packlength) {
-      packlength = len_arg <= 255
-                       ? 1
-                       : len_arg <= 65535 ? 2 : len_arg <= 16777215 ? 3 : 4;
+      packlength = len_arg <= 255        ? 1
+                   : len_arg <= 65535    ? 2
+                   : len_arg <= 16777215 ? 3
+                                         : 4;
     }
   }
 
@@ -3944,7 +3945,7 @@ class Field_blob : public Field_longstr {
 
 class Field_vector : public Field_blob {
  public:
-  static const uint32 max_dimensions = 16383;
+  static const uint32 max_dimensions = vector_constants::max_dimensions;
   static const uint32 precision = sizeof(float);
   static uint32 dimension_bytes(uint32 dimensions) {
     return precision * dimensions;
@@ -3996,6 +3997,7 @@ class Field_vector : public Field_blob {
   type_conversion_status store_decimal(const my_decimal *) final;
   type_conversion_status store(const char *from, size_t length,
                                const CHARSET_INFO *cs) final;
+  bool eq_def(const Field *field) const override;
   uint is_equal(const Create_field *new_field) const override;
   String *val_str(String *, String *) const override;
 };
@@ -4306,21 +4308,23 @@ class Field_typed_array final : public Field_json {
   int key_cmp(const uchar *, const uchar *) const override { return -1; }
   /**
    * @brief This function will behave similarly to MEMBER OF json operation,
-   *        unlike regular key_cmp. The key value will be checked against
-   *        members of the array and the presence of the key will be considered
-   *        as the record matching the given key. This particular definition is
-   *        used in descending ref index scans. Descending index scan uses
-   *        handler::ha_index_prev() function to read from the storage engine
-   *        which does not compare the index key with the search key [unlike
-   *        handler::ha_index_next_same()]. Hence each retrieved record needs
-   *        to be validated to find a stop point. Refer key_cmp_if_same() and
-   *        RefIterator<true>::Read() for more details.
+   *        unlike regular key_cmp. Since scans on multi-valued indexes always
+   *        go in the ascending direction, and always start on the first entry
+   *        that is not less than the key, a record not matching the MEMBER OF
+   *        condition is assumed to be greater than the key, so the function
+   *        always returns 1, indicating greater than, for not found.
+   *        This definition is used in descending ref index scans.
+   *        Descending index scan uses handler::ha_index_prev() function to read
+   *        from the storage engine which does not compare the index key with
+   *        the search key [unlike handler::ha_index_next_same()]. Hence each
+   *        retrieved record needs to be validated to find a stop point. Refer
+   *        key_cmp_if_same() and RefIterator<true>::Read() for more details.
    *
    * @param   key_ptr         Pointer to the key
    * @param   key_length      Key length
    * @return
    *      0   Key found in the record
-   *      -1  Key not found in the record
+   *      1   Key not found in the record
    */
   int key_cmp(const uchar *key_ptr, uint key_length) const override;
   /**

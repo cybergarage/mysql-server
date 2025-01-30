@@ -405,6 +405,18 @@ const SharingAllowedParam utility_stmt[] = {
 INSTANTIATE_TEST_SUITE_P(Utility, SharingAllowedTest,
                          ::testing::ValuesIn(utility_stmt));
 
+const SharingAllowedParam empty_stmt[] = {
+    {"", Allowed::Always},         //
+    {"  ", Allowed::Always},       //
+    {"-- ", Allowed::Always},      //
+    {"/* */", Allowed::Always},    //
+    {" /* */ ", Allowed::Always},  //
+    {";", Allowed::Always},        //
+};
+
+INSTANTIATE_TEST_SUITE_P(Empty, SharingAllowedTest,
+                         ::testing::ValuesIn(empty_stmt));
+
 const SharingAllowedParam fail_stmts[] = {
     {"select '", Allowed::Always},   // SELECT, '
     {"select \"", Allowed::Always},  // SELECT, "
@@ -416,6 +428,8 @@ INSTANTIATE_TEST_SUITE_P(Fail, SharingAllowedTest,
 
 int main(int argc, char *argv[]) {
   TlsLibraryContext lib_ctx;
+
+  SqlLexer::init_library();
 
   ::testing::InitGoogleTest(&argc, argv);
 

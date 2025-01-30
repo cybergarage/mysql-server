@@ -71,10 +71,10 @@ class TestRestApiEnable : public RouterComponentBootstrapTest {
     cluster_http_port = port_pool_.get_next_available();
 
     SCOPED_TRACE("// Launch a server mock that will act as our cluster member");
-    const auto trace_file = get_data_dir().join("rest_api_enable.js").str();
-
-    ProcessManager::launch_mysql_server_mock(
-        trace_file, cluster_node_port, EXIT_SUCCESS, false, cluster_http_port);
+    mock_server_spawner().spawn(mock_server_cmdline("rest_api_enable.js")
+                                    .port(cluster_node_port)
+                                    .http_port(cluster_http_port)
+                                    .args());
 
     set_globals();
     set_router_accepting_ports();
@@ -136,7 +136,7 @@ class TestRestApiEnable : public RouterComponentBootstrapTest {
     check_exit_code(router_bootstrap, EXIT_SUCCESS);
 
     EXPECT_TRUE(router_bootstrap.expect_output(
-        "MySQL Router configured for the InnoDB Cluster 'mycluster'"));
+        "MySQL Router configured for the InnoDB Cluster 'my-cluster'"));
 
     return router_bootstrap;
   }
@@ -640,7 +640,7 @@ TEST_P(EnableWrongHttpsPort, ensure_bootstrap_fails_for_invalid_https_port) {
   check_exit_code(router_bootstrap, EXIT_FAILURE);
 
   EXPECT_FALSE(router_bootstrap.expect_output(
-      "MySQL Router configured for the InnoDB Cluster 'mycluster'"));
+      "MySQL Router configured for the InnoDB Cluster 'my-cluster'"));
 
   EXPECT_FALSE(certificate_files_exists(
       {cert_file_t::k_ca_key, cert_file_t::k_ca_cert, cert_file_t::k_router_key,
@@ -697,7 +697,7 @@ TEST_F(TestRestApiEnable, bootstrap_conflicting_options) {
   check_exit_code(router_bootstrap, EXIT_FAILURE);
 
   EXPECT_FALSE(router_bootstrap.expect_output(
-      "MySQL Router configured for the InnoDB Cluster 'mycluster'"));
+      "MySQL Router configured for the InnoDB Cluster 'my-cluster'"));
 
   EXPECT_FALSE(certificate_files_exists(
       {cert_file_t::k_ca_key, cert_file_t::k_ca_cert, cert_file_t::k_router_key,
@@ -981,16 +981,16 @@ class TestRestApiEnableBootstrapFailover : public TestRestApiEnable {
 
       std::string trace_file;
       if (i == 0 || !failover_successful) {
-        trace_file = get_data_dir()
-                         .join("bootstrap_failover_super_read_only_1_gr.js")
-                         .str();
+        trace_file = "bootstrap_failover_super_read_only_1_gr.js";
       } else {
-        trace_file = get_data_dir().join("rest_api_enable.js").str();
+        trace_file = "rest_api_enable.js";
       }
 
       mock_servers.emplace_back(
-          port, ProcessManager::launch_mysql_server_mock(
-                    trace_file, port, EXIT_SUCCESS, false, cluster_http_port));
+          port, mock_server_spawner().spawn(mock_server_cmdline(trace_file)
+                                                .port(port)
+                                                .http_port(cluster_http_port)
+                                                .args()));
 
       auto &mock_server = mock_servers.back().second;
       ASSERT_NO_FATAL_FAILURE(check_port_ready(mock_server, port));
@@ -1011,7 +1011,7 @@ class TestRestApiEnableBootstrapFailover : public TestRestApiEnable {
 
  private:
   const mysqlrouter::MetadataSchemaVersion metadata_version{2, 2, 0};
-  const std::string cluster_name{"mycluster"};
+  const std::string cluster_name{"my-cluster"};
   std::vector<std::pair<uint16_t, ProcessWrapper &>> mock_servers;
   std::vector<GRNode> gr_nodes;
   std::vector<ClusterNode> cluster_nodes;

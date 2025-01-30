@@ -830,8 +830,9 @@ bool init_error_log();
 
   @param filename        Name of error log file
   @param get_lock        Should we acquire LOCK_error_log?
+  @param log_type        Error log, diagnostic log or both.
 */
-bool open_error_log(const char *filename, bool get_lock);
+bool open_error_log(const char *filename, bool get_lock, uint log_type);
 
 /**
   Free any error log resources.
@@ -1423,6 +1424,21 @@ enum loglevel log_prio_from_label(const char *label);
 int log_line_submit(log_line *ll);
 
 /**
+  Set/reset one or more log line flags.
+
+  Example to set the flag:
+    log_line_set_flag(ll, LOG_LINE_EMIT_TELEMETRY, LOG_LINE_EMIT_TELEMETRY);
+  to reset the flag:
+    log_line_set_flag(ll, LOG_LINE_EMIT_TELEMETRY, 0);
+
+  @param           ll                  log line structure
+  @param           mask                mask that defines flags to be changed
+  @param           value               value to set to selected flags
+*/
+void log_line_set_flag(log_line *ll, log_line_flags_mask mask,
+                       log_line_flags_mask value);
+
+/**
   Whether to generate a UTC timestamp, or one following system-time.
   These values are not arbitrary; they must correspond to the range
   and meaning of opt_log_timestamps.
@@ -1599,7 +1615,9 @@ int log_builtins_exit();
 
   @param         buffer       buffer containing serialized error message
   @param         length       number of bytes in buffer
+  @param         log_type     type of log, e.g. error or diagnostic log
 */
-void log_write_errstream(const char *buffer, size_t length);
+void log_write_errstream(const char *buffer, size_t length,
+                         enum enum_log_type log_type);
 
 #endif /* LOG_H */

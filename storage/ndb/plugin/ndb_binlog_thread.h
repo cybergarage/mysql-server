@@ -101,6 +101,11 @@ class Ndb_binlog_thread : public Ndb_component {
 
   } m_cache_spill_checker;
 
+  // Current value for ndb_log_cache_size
+  ulong m_configured_ndb_log_cache_size{0};
+  // Reconfigure binlog transaction cache size, if changed
+  bool configure_binlog_cache_size(THD *thd, ulong new_cache_size);
+
   bool acquire_apply_status_reference();
   void release_apply_status_reference();
 
@@ -371,6 +376,7 @@ class Ndb_binlog_thread : public Ndb_component {
 
 #ifndef NDEBUG
   void dbug_log_table_maps(Ndb *ndb, Uint64 current_epoch);
+  void dbug_log_multi_server_id(Ndb *ndb, Uint64 current_epoch);
 #endif
 };
 

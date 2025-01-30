@@ -38,20 +38,24 @@ ENDIF()
 SET(TESTS
   #example
   fil_path
+  fts0vlc
   ha_innodb
+  fts0fts
   log0log
   mem0mem
   os0file
   os0thread-create
   srv0conc
   sync0rw
+  ut0bitset
   ut0crc32
   ut0lock_free_hash
   ut0math
   ut0mem
   ut0new
-  ut0rnd
   ut0object_cache
+  ut0rbt
+  ut0rnd
 )
 
 ADD_COMPILE_FLAGS(

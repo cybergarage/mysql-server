@@ -38,6 +38,8 @@ IF(MY_COMPILER_IS_CLANG)
   SET(CMAKE_INCLUDE_SYSTEM_FLAG_C "/imsvc ")
   SET(CMAKE_INCLUDE_SYSTEM_FLAG_CXX "/imsvc ")
   ADD_DEFINITIONS(-DWIN32_CLANG)
+ELSE()
+  SET(WIN32_VS 1)
 ENDIF()
 
 # avoid running system checks by using pre-cached check results
@@ -157,6 +159,9 @@ IF(MSVC)
   #     Allowing inline reduces test time using the debug server by
   #     30% or so. If you do want to keep inlining off, set the
   #     cmake flag WIN_DEBUG_NO_INLINE.
+  # - Disable optimization
+  #     /Od
+  #     Turns off all optimizations in the program and speeds compilation.
   FOREACH(lang C CXX)
     IF(FPROFILE_GENERATE OR FPROFILE_USE)
       SET(CMAKE_${lang}_FLAGS_RELEASE "${CMAKE_${lang}_FLAGS_RELEASE} /Zi")
@@ -165,6 +170,11 @@ IF(MSVC)
     ENDIF()
   ENDFOREACH()
 
+  # Defaults initialized by cmake:
+  # DEBUG          /MDd /Zi /Od  /Ob0 /RTC1
+  # RELWITHDEBINFO /MD  /Zi /O2  /Ob1 /DNDEBUG
+  # RELEASE        /MD      /O2  /Ob2 /DNDEBUG
+  # MINSIZEREL     /MD      /O1  /Ob1 /DNDEBUG
   FOREACH(flag
       CMAKE_C_FLAGS_MINSIZEREL
       CMAKE_C_FLAGS_RELEASE    CMAKE_C_FLAGS_RELWITHDEBINFO

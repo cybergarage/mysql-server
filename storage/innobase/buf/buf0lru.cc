@@ -257,7 +257,7 @@ static void buf_LRU_drop_page_hash_for_tablespace(buf_pool_t *buf_pool,
   if (!found) {
     /* Somehow, the tablespace does not exist.  Nothing to drop. */
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   page_no_t *page_arr = static_cast<page_no_t *>(ut::malloc_withkey(
@@ -1336,6 +1336,15 @@ loop:
     block->page.reset_flush_observer();
     return block;
   }
+
+  /* No free blocks found on the free list, we need to run a LRU scan to find a
+  block. In meantime, we wake up simulated AIO threads that may have requests
+  queued with IOREquest::DO_NOT_WAKE waiting for them to wake up. If one of
+  threads that are requesting the new IOs waits for a new block to place the
+  read IO for that block, this would deadlock. Waking up the simulated AIO
+  threads may cause some blocks to be IO_FIX unfixed and become available to
+  evict. */
+  os_aio_simulated_wake_handler_threads();
 
   MONITOR_INC(MONITOR_LRU_GET_FREE_LOOPS);
 

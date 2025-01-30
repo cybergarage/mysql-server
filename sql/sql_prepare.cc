@@ -691,11 +691,10 @@ bool Prepared_statement::insert_parameters(
       param->set_data_type_actual(MYSQL_TYPE_VARCHAR);
       // see Item_param::set_str() for explanation
       param->set_collation_actual(
-          param->collation_source() == &my_charset_bin
-              ? &my_charset_bin
-              : param->collation.collation != &my_charset_bin
-                    ? param->collation.collation
-                    : current_thd->variables.collation_connection);
+          param->collation_source() == &my_charset_bin ? &my_charset_bin
+          : param->collation.collation != &my_charset_bin
+              ? param->collation.collation
+              : current_thd->variables.collation_connection);
 
     } else if (parameters[i].null_bit) {
       param->set_null();
@@ -1326,6 +1325,8 @@ bool Prepared_statement::prepare_query(THD *thd) {
     case SQLCOM_CREATE_EVENT:
     case SQLCOM_ALTER_EVENT:
     case SQLCOM_DROP_EVENT:
+    case SQLCOM_CREATE_LIBRARY:
+    case SQLCOM_DROP_LIBRARY:
     case SQLCOM_SELECT:
     case SQLCOM_DO:
     case SQLCOM_DELETE:
@@ -1346,6 +1347,7 @@ bool Prepared_statement::prepare_query(THD *thd) {
     case SQLCOM_SHOW_CREATE_FUNC:
     case SQLCOM_SHOW_CREATE_PROC:
     case SQLCOM_SHOW_CREATE:
+    case SQLCOM_SHOW_CREATE_LIBRARY:
     case SQLCOM_SHOW_CREATE_TRIGGER:
     case SQLCOM_SHOW_CREATE_USER:
     case SQLCOM_SHOW_DATABASES:
@@ -2902,8 +2904,9 @@ bool Prepared_statement::execute_loop(THD *thd, String *expanded_query,
   if (m_lex->m_sql_cmd != nullptr) {
     m_lex->m_sql_cmd->enable_secondary_storage_engine();
   }
-  // Remember the original state of the general log.
-  const ulonglong orig_log_state = thd->variables.option_bits & OPTION_LOG_OFF;
+  // Remember if the general log was temporarily disabled when repreparing the
+  // statement for a secondary engine.
+  bool general_log_temporarily_disabled = false;
 
   // Track whether the statement needs to be reprepared:
   bool need_reprepare = false;
@@ -2918,6 +2921,13 @@ bool Prepared_statement::execute_loop(THD *thd, String *expanded_query,
   if (m_active_protocol != nullptr &&
       m_active_protocol != thd->get_protocol()) {
     assert(false);
+    need_reprepare = true;
+  }
+
+  // Some SQL commands need re-preparation, such as Sql_cmd_create_table
+  // when the keys involve an expression.
+  if (!m_first_execution && m_lex->m_sql_cmd &&
+      m_lex->m_sql_cmd->reprepare_on_execute_required()) {
     need_reprepare = true;
   }
 
@@ -2985,7 +2995,10 @@ bool Prepared_statement::execute_loop(THD *thd, String *expanded_query,
       Re-enable the general log if it was temporarily disabled while repreparing
       and executing a statement for a secondary engine.
     */
-    thd->variables.option_bits &= (OPTION_LOG_OFF ^ ~orig_log_state);
+    if (general_log_temporarily_disabled) {
+      thd->variables.option_bits &= ~OPTION_LOG_OFF;
+      general_log_temporarily_disabled = false;
+    }
 
     // Exit immediately if execution is successful
     if (!error) {
@@ -3001,10 +3014,11 @@ bool Prepared_statement::execute_loop(THD *thd, String *expanded_query,
       /*
         Reprepare_observer ensures that the statement is retried
         a maximum number of times, to avoid an endless loop.
+        NOTE: When executing a statement that is a procedure call, this error
+        code may be reported without having an invalidated reprepare observer.
       */
-      assert(stmt_reprepare_observer != nullptr &&
-             stmt_reprepare_observer->is_invalidated());
-      if (!stmt_reprepare_observer->can_retry()) {
+      if (!stmt_reprepare_observer->is_invalidated() ||
+          !stmt_reprepare_observer->can_retry()) {
         /*
           Reprepare_observer sets error status in DA but Sql_condition is not
           added. Please check Reprepare_observer::report_error(). Pushing
@@ -3047,7 +3061,10 @@ bool Prepared_statement::execute_loop(THD *thd, String *expanded_query,
       Disable the general log. The query was written to the general log in
       the first attempt to execute it. No need to write it twice.
     */
-    thd->variables.option_bits |= OPTION_LOG_OFF;
+    if ((thd->variables.option_bits & OPTION_LOG_OFF) == 0) {
+      thd->variables.option_bits |= OPTION_LOG_OFF;
+      general_log_temporarily_disabled = true;
+    }
     /*
       Prepare for re-prepare and re-optimization:
       - Clear the current diagnostics area.
@@ -3067,7 +3084,10 @@ bool Prepared_statement::execute_loop(THD *thd, String *expanded_query,
 
   // Re-enable the general log if it was temporarily disabled while repreparing
   // and executing a statement for a secondary engine.
-  thd->variables.option_bits &= (OPTION_LOG_OFF ^ ~orig_log_state);
+  if (general_log_temporarily_disabled) {
+    thd->variables.option_bits &= ~OPTION_LOG_OFF;
+    general_log_temporarily_disabled = false;
+  }
 
   // Record in performance schema whether a secondary engine was used.
   const bool used_secondary = thd->secondary_engine_optimization() ==
@@ -3075,7 +3095,8 @@ bool Prepared_statement::execute_loop(THD *thd, String *expanded_query,
   MYSQL_SET_PS_SECONDARY_ENGINE(m_prepared_stmt, used_secondary);
   mysql_thread_set_secondary_engine(used_secondary);
   mysql_statement_set_secondary_engine(thd->m_statement_psi, used_secondary);
-  thd->set_secondary_engine_statement_context(nullptr);
+  thd->cleanup_after_statement_execution();
+  m_first_execution = false;
 
   return error;
 }
@@ -3208,7 +3229,7 @@ bool Prepared_statement::reprepare(THD *thd) {
   */
   thd->get_stmt_da()->reset_condition_info(thd);
 
-  copy_guard.commit();
+  copy_guard.release();
 
   return false;
 }

@@ -223,8 +223,12 @@ int ha_mock::unload_table(const char *db_name, const char *table_name,
                           bool error_if_not_loaded) {
   if (error_if_not_loaded &&
       loaded_tables->get(db_name, table_name) == nullptr) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
-             "Table is not loaded on a secondary engine");
+    std::string err_msg{"Table "};
+    err_msg.append(db_name);
+    err_msg.append(".");
+    err_msg.append(table_name);
+    err_msg.append(" is not loaded in secondary engine.");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
     return 1;
   } else {
     loaded_tables->erase(db_name, table_name);
@@ -374,15 +378,20 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost,
   return false;
 }
 
-static bool ModifyAccessPathCost(THD *thd [[maybe_unused]],
-                                 const JoinHypergraph &hypergraph
-                                 [[maybe_unused]],
-                                 AccessPath *path) {
+namespace {
+bool ModifyViewAccessPathCost(THD *thd [[maybe_unused]],
+                              const JoinHypergraph &hypergraph [[maybe_unused]],
+                              AccessPath *path) {
+  if (thd->secondary_engine_optimization() !=
+      Secondary_engine_optimization::SECONDARY) {
+    return false;
+  }
   assert(!thd->is_error());
   assert(hypergraph.query_block()->join == hypergraph.join());
   AssertSupportedPath(path);
   return false;
 }
+}  // namespace
 
 static handler *Create(handlerton *hton, TABLE_SHARE *table_share, bool,
                        MEM_ROOT *mem_root) {
@@ -399,11 +408,12 @@ static int Init(MYSQL_PLUGIN p) {
   hton->db_type = DB_TYPE_UNKNOWN;
   hton->prepare_secondary_engine = PrepareSecondaryEngine;
   hton->secondary_engine_pre_prepare_hook = SecondaryEnginePrePrepareHook;
+  hton->cardinality_estimation_hook = nullptr;
   hton->optimize_secondary_engine = OptimizeSecondaryEngine;
   hton->compare_secondary_engine_cost = CompareJoinCost;
   hton->secondary_engine_flags =
       MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN);
-  hton->secondary_engine_modify_access_path_cost = ModifyAccessPathCost;
+  hton->secondary_engine_modify_view_ap_cost = ModifyViewAccessPathCost;
   return 0;
 }
 

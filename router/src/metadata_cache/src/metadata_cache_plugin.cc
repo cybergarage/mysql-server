@@ -30,9 +30,7 @@
 #include <array>
 #include <stdexcept>
 #include <string>
-#include <thread>
 
-#include "dim.h"
 #include "keyring/keyring_manager.h"
 #include "metadata_cache.h"
 #include "my_thread.h"  // my_thread_self_setname
@@ -40,12 +38,10 @@
 #include "mysql/harness/dynamic_config.h"
 #include "mysql/harness/loader_config.h"
 #include "mysql/harness/logging/logging.h"
-#include "mysql/harness/utility/string.h"
 #include "mysqlrouter/mysql_client_thread_token.h"
 #include "mysqlrouter/mysql_session.h"  // kSslModePreferred
 #include "mysqlrouter/supported_metadata_cache_options.h"
 #include "mysqlrouter/uri.h"
-#include "mysqlrouter/utils.h"
 #include "plugin_config.h"
 
 IMPORT_LOG_FUNCTIONS()
@@ -71,10 +67,8 @@ static metadata_cache::RouterAttributes get_router_attributes(
 
       const bool is_rw_split = routing_section->has("access_mode") &&
                                routing_section->get("access_mode") == "auto";
-      const bool is_rw = !is_rw_split && mysql_harness::utility::ends_with(
-                                             destinations, "PRIMARY");
-      const bool is_ro = !is_rw_split && mysql_harness::utility::ends_with(
-                                             destinations, "SECONDARY");
+      const bool is_rw = !is_rw_split && destinations.ends_with("PRIMARY");
+      const bool is_ro = !is_rw_split && destinations.ends_with("SECONDARY");
 
       if (protocol == "classic") {
         if (is_rw_split)
@@ -119,11 +113,12 @@ class MetadataServersStateListener
     metadata_cache::MetadataCacheAPI::instance()->remove_state_listener(this);
   }
 
-  void notify_instances_changed(
-      const metadata_cache::ClusterTopology &cluster_topology,
-      const bool md_servers_reachable, const uint64_t view_id) override {
+  void notify_instances_changed(const bool md_servers_reachable,
+                                const uint64_t view_id) override {
     if (!md_servers_reachable) return;
 
+    const auto &cluster_topology =
+        metadata_cache::MetadataCacheAPI::instance()->get_cluster_topology();
     if (cluster_topology.metadata_servers.empty()) {
       // This happens for example when the router could connect to one of the
       // metadata servers but failed to fetch metadata because the connection
@@ -136,10 +131,10 @@ class MetadataServersStateListener
 
     // need to convert from ManagedInstance to uri string
     std::vector<std::string> metadata_servers_str;
-    for (auto &md_server : cluster_topology.metadata_servers) {
+    for (const auto &md_server : cluster_topology.metadata_servers) {
       mysqlrouter::URI uri;
       uri.scheme = "mysql";
-      uri.host = md_server.address();
+      uri.host = md_server.hostname();
       uri.port = md_server.port();
       metadata_servers_str.emplace_back(uri.str());
     }
@@ -237,7 +232,8 @@ static void start(mysql_harness::PluginFuncEnv *env) {
                          config.metadata_servers_addresses, ttl_config,
                          config.ssl_options, target_cluster, session_config,
                          g_router_attributes, config.thread_stack_size,
-                         config.use_gr_notifications, config.get_view_id());
+                         config.use_gr_notifications, config.get_view_id(),
+                         config.close_connection_after_refresh);
 
     // register callback
     md_cache_dynamic_state = std::move(config.metadata_cache_dynamic_state);

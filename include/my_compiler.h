@@ -113,9 +113,6 @@ constexpr bool unlikely(bool expr) { return expr; }
 // clang -fsanitize=undefined
 #if defined(HAVE_UBSAN) && defined(__clang__)
 #define SUPPRESS_UBSAN MY_ATTRIBUTE((no_sanitize("undefined")))
-#if (__clang_major__ >= 10)
-#define SUPPRESS_UBSAN_CLANG10 MY_ATTRIBUTE((no_sanitize("undefined")))
-#endif
 // gcc -fsanitize=undefined
 #elif defined(HAVE_UBSAN) && __has_attribute(no_sanitize_undefined)
 #define SUPPRESS_UBSAN MY_ATTRIBUTE((no_sanitize_undefined))
@@ -123,11 +120,6 @@ constexpr bool unlikely(bool expr) { return expr; }
 #define SUPPRESS_UBSAN
 #endif
 #endif /* SUPPRESS_UBSAN */
-
-// TODO(tdidriks) Fix new 'applying offset to null pointer' warnings.
-#ifndef SUPPRESS_UBSAN_CLANG10
-#define SUPPRESS_UBSAN_CLANG10
-#endif
 
 #ifndef SUPPRESS_TSAN
 #if defined(HAVE_TSAN) && defined(__clang__)
@@ -355,5 +347,27 @@ constexpr bool unlikely(bool expr) { return expr; }
  */
 #define MY_COMPILER_CLANG_WORKAROUND_FALSE_POSITIVE_UNUSED_VARIABLE_WARNING() \
   MY_COMPILER_CLANG_DIAGNOSTIC_IGNORE("-Wunused-variable")
+
+/**
+ * ignore -Wsuggest-attribute=format compiler warnings for \@see \@ref
+ *
+ * @code
+ * MY_COMPILER_DIAGNOSTIC_PUSH()
+ * MY_COMPILER_GCC_WORKAROUND_FALSE_POSITIVE_SUGGEST_ATTRIBUTE_FORMAT()
+ * ...
+ * MY_COMPILER_DIAGNOSTIC_POP()
+ * @endcode
+ *
+ * allows to work around false positives -Wsuggest-attribute=format warnings
+ * like:
+ *
+ * - \@sa \@ref
+ * - \@see \@ref
+ * - \@return \@ref
+ *   https://gcc.gnu.org/bugzilla/show_bug.cgi?id=116954
+ *
+ */
+#define MY_COMPILER_GCC_WORKAROUND_FALSE_POSITIVE_SUGGEST_ATTRIBUTE_FORMAT() \
+  MY_COMPILER_GCC_DIAGNOSTIC_IGNORE("-Wsuggest-attribute=format")
 
 #endif /* MY_COMPILER_INCLUDED */

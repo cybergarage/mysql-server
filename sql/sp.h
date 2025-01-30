@@ -197,7 +197,9 @@ enum_sp_return_code sp_cache_routine(THD *thd, enum_sp_type type,
                                      const sp_name *name, bool lookup_only,
                                      sp_head **sp);
 
-bool sp_exist_routines(THD *thd, Table_ref *procs, bool is_proc);
+bool sp_exists_library(THD *thd, sp_name *name);
+
+bool sp_exist_routines(THD *thd, Table_ref *procs, enum_sp_type sp_type);
 
 bool sp_show_create_routine(THD *thd, enum_sp_type type, sp_name *name);
 
@@ -407,9 +409,10 @@ bool sp_check_name(LEX_STRING *ident);
 Table_ref *sp_add_to_query_tables(THD *thd, LEX *lex, const char *db,
                                   const char *name);
 
-Item *sp_prepare_func_item(THD *thd, Item **it_addr);
+Item *sp_prepare_func_item(THD *thd, bool standalone, Item **it_addr);
 
-bool sp_eval_expr(THD *thd, Field *result_field, Item **expr_item_ptr);
+bool sp_eval_expr(THD *thd, bool standalone, Field *result_field,
+                  Item **expr_item_ptr);
 
 String *sp_get_item_value(THD *thd, Item *item, String *str);
 

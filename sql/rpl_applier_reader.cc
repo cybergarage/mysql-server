@@ -169,8 +169,10 @@ Log_event *Rpl_applier_reader::read_next_event() {
   });
   DBUG_EXECUTE_IF("force_sql_thread_error", return nullptr;);
 
+  auto &applier_metrics = m_rli->get_applier_metrics();
   if (m_reading_active_log &&
       m_relaylog_file_reader.position() >= m_log_end_pos) {
+    applier_metrics.get_work_from_source_wait_metric().increment_counter();
     while (true) {
       if (sql_slave_killed(m_rli->info_thd, m_rli)) return nullptr;
 
@@ -239,7 +241,11 @@ Log_event *Rpl_applier_reader::read_next_event() {
   }
 
   m_rli->set_event_start_pos(m_relaylog_file_reader.position());
-  ev = m_relaylog_file_reader.read_event_object();
+  {
+    auto guard =
+        applier_metrics.get_time_to_read_from_relay_log_metric().time_scope();
+    ev = m_relaylog_file_reader.read_event_object();
+  }
   if (ev != nullptr) {
     m_rli->set_future_event_relay_log_pos(m_relaylog_file_reader.position());
     ev->future_event_relay_log_pos = m_rli->get_future_event_relay_log_pos();
@@ -249,8 +255,9 @@ Log_event *Rpl_applier_reader::read_next_event() {
   if (m_relaylog_file_reader.get_error_type() == Binlog_read_error::READ_EOF &&
       !m_reading_active_log) {
     bool force_purging = false;
-    if (m_rli->is_receiver_waiting_for_rl_space.load() &&
-        !m_rli->is_in_group()) {
+    bool is_in_group = m_rli->is_parallel_exec() ? m_rli->is_mts_in_group()
+                                                 : m_rli->is_in_group();
+    if (m_rli->is_receiver_waiting_for_rl_space.load() && !is_in_group) {
       force_purging = true;
       if (m_rli->is_parallel_exec()) {
         mysql_mutex_unlock(&m_rli->data_lock);
@@ -313,16 +320,21 @@ bool Rpl_applier_reader::wait_for_new_event() {
   mysql_mutex_unlock(&m_rli->data_lock);
 
   int ret = 0;
-  if (m_rli->is_parallel_exec() &&
-      (opt_mta_checkpoint_period != 0 ||
-       DBUG_EVALUATE_IF("check_replica_debug_group", 1, 0))) {
-    std::chrono::nanoseconds timeout =
-        std::chrono::nanoseconds{opt_mta_checkpoint_period * 1000000ULL};
-    DBUG_EXECUTE_IF("check_replica_debug_group",
-                    { timeout = std::chrono::nanoseconds{10000000}; });
-    ret = m_rli->relay_log.wait_for_update(timeout);
-  } else
-    ret = m_rli->relay_log.wait_for_update();
+  {
+    auto guard = m_rli->get_applier_metrics()
+                     .get_work_from_source_wait_metric()
+                     .time_scope();
+    if (m_rli->is_parallel_exec() &&
+        (opt_mta_checkpoint_period != 0 ||
+         DBUG_EVALUATE_IF("check_replica_debug_group", 1, 0))) {
+      std::chrono::nanoseconds timeout =
+          std::chrono::nanoseconds{opt_mta_checkpoint_period * 1000000ULL};
+      DBUG_EXECUTE_IF("check_replica_debug_group",
+                      { timeout = std::chrono::nanoseconds{10000000}; });
+      ret = m_rli->relay_log.wait_for_update(timeout);
+    } else
+      ret = m_rli->relay_log.wait_for_update();
+  }
 
   // re-acquire data lock since we released it earlier
   mysql_mutex_lock(&m_rli->data_lock);
@@ -394,7 +406,9 @@ bool Rpl_applier_reader::move_to_next_log(bool force) {
   m_rli->set_event_relay_log_pos(BIN_LOG_HEADER_SIZE);
   m_rli->set_event_relay_log_name(m_linfo.log_file_name);
 
-  if (!m_rli->is_in_group()) {
+  bool is_in_group = m_rli->is_parallel_exec() ? m_rli->is_mts_in_group()
+                                               : m_rli->is_in_group();
+  if (!is_in_group) {
     /*
       To make the code be simpler, it is better to remove the following 'if'
       code block. should_purge_current_relay_log is rarely true. So it is ok

@@ -211,6 +211,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "os0enc.h"
 #include "os0file.h"
 
+#include <scope_guard.h>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -675,6 +676,7 @@ static PSI_memory_info pfs_instrumented_innodb_memory[] = {
 performance schema instrumented if "UNIV_PFS_MUTEX"
 is defined */
 static PSI_mutex_info all_innodb_mutexes[] = {
+    PSI_MUTEX_KEY(alter_stage_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(autoinc_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(autoinc_persisted_mutex, 0, 0, PSI_DOCUMENT_ME),
 #ifndef PFS_SKIP_BUFFER_MUTEX_RWLOCK
@@ -1348,6 +1350,20 @@ static int innobase_rollback(handlerton *hton, /*!< in/out: InnoDB handlerton */
                              bool rollback_trx); /*!< in: true - rollback entire
                                                  transaction false - rollback
                                                  the current statement only */
+
+/** Writes DELETE_SCHEMA_DIRECTORY_LOG for DROP SCHEMA
+ @param  hton  InnoDB handlerton
+ @param  schema_name name of the schema
+ @return bool  */
+static bool innobase_write_ddl_drop_schema(handlerton *hton,
+                                           const char *schema_name);
+
+/** Writes DELETE_SCHEMA_DIRECTORY_LOG for CREATE SCHEMA
+ @param  hton  InnoDB handlerton
+ @param  schema_name name of the schema
+ @return bool */
+static bool innobase_write_ddl_create_schema(handlerton *hton,
+                                             const char *schema_name);
 
 /** Rolls back a transaction to a savepoint.
  @return 0 if success, HA_ERR_NO_SAVEPOINT if no savepoint with the
@@ -3400,6 +3416,18 @@ class Validate_files {
 void Validate_files::check(const Const_iter &begin, const Const_iter &end,
                            size_t thread_id) {
   const auto sys_space_name = dict_sys_t::s_sys_space_name;
+  THD *internal_thd = nullptr;
+  if (current_thd == nullptr) {
+    internal_thd = create_internal_thd();
+    ut_a(internal_thd);
+    ut_ad(internal_thd == current_thd);
+  }
+
+  const auto thd_guard = create_scope_guard([internal_thd]() {
+    if (internal_thd != nullptr) {
+      destroy_internal_thd(internal_thd);
+    }
+  });
 
   /* Validate all tablespaces if innodb_validate_tablespace_paths=ON OR
   server is in recovery  OR Change buffer is not empty. Change buffer
@@ -3566,9 +3594,13 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
     Windows and POSIX. */
     Fil_path::normalize(dd_path);
     Fil_state state = Fil_state::MATCHES;
-
     state = fil_tablespace_path_equals(space_id, space_name, fsp_flags, dd_path,
                                        &new_path);
+
+    if (state == Fil_state::COMPARE_ERROR) {
+      ++m_n_errors;
+      break;
+    }
 
     if (state == Fil_state::MATCHES) {
       new_path.assign(dd_path);
@@ -3581,13 +3613,13 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
     bool file_path_changed = (state == Fil_state::MOVED);
 
     if (state == Fil_state::MATCHES || state == Fil_state::MOVED ||
-        state == Fil_state::MOVED_PREV_OR_HAS_DATADIR) {
+        state == Fil_state::MOVED_PREV) {
       /* We need to update space name and table name for partitioned tables
       if letter case is different. */
       if (fil_update_partition_name(space_id, fsp_flags, true, space_str,
                                     new_path)) {
         file_name_changed = true;
-        if (state != Fil_state::MOVED_PREV_OR_HAS_DATADIR) {
+        if (state != Fil_state::MOVED_PREV) {
           state = Fil_state::MOVED;
         }
       }
@@ -3596,13 +3628,15 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
       if (space_str.compare(space_name) != 0) {
         old_space.assign(space_name);
         space_name = space_str.c_str();
-        if (state != Fil_state::MOVED_PREV_OR_HAS_DATADIR) {
+        if (state != Fil_state::MOVED_PREV) {
           state = Fil_state::MOVED;
         }
       }
     }
 
     switch (state) {
+      case Fil_state::COMPARE_ERROR:
+        ut_error;
       case Fil_state::MATCHES:
         break;
 
@@ -3667,18 +3701,21 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
         }
         break;
 
-      case Fil_state::MOVED_PREV_OR_HAS_DATADIR:
+      case Fil_state::MOVED_PREV:
         fil_add_moved_space(dd_tablespace->id(), space_id, space_name, dd_path,
                             new_path, true);
         ++m_n_moved;
 
-        if (!old_space.empty()) {
-          ib::info(ER_IB_MSG_FIL_STATE_MOVED_CORRECTED, prefix.c_str(),
-                   static_cast<unsigned long long>(dd_tablespace->id()),
-                   static_cast<unsigned int>(space_id), old_space.c_str(),
-                   space_name);
+        if (m_n_moved == MOVED_FILES_PRINT_THRESHOLD) {
+          ib::info(ER_IB_MSG_FIL_STATE_MOVED_TOO_MANY, prefix.c_str());
         }
 
+        if (m_n_moved < MOVED_FILES_PRINT_THRESHOLD) {
+          ib::info(ER_IB_MSG_FIL_STATE_MOVED_PREV, prefix.c_str(),
+                   static_cast<unsigned long long>(dd_tablespace->id()),
+                   static_cast<unsigned int>(space_id), space_name,
+                   new_path.c_str());
+        }
         break;
 
       case Fil_state::RENAMED:
@@ -5402,6 +5439,8 @@ static int innodb_init(void *p) {
   innobase_hton->state = SHOW_OPTION_YES;
   innobase_hton->db_type = DB_TYPE_INNODB;
   innobase_hton->savepoint_offset = sizeof(trx_named_savept_t);
+  innobase_hton->log_ddl_drop_schema = innobase_write_ddl_drop_schema;
+  innobase_hton->log_ddl_create_schema = innobase_write_ddl_create_schema;
   innobase_hton->close_connection = innobase_close_connection;
   innobase_hton->kill_connection = innobase_kill_connection;
   innobase_hton->savepoint_set = innobase_savepoint;
@@ -6364,6 +6403,57 @@ static int innobase_savepoint(
   }
 
   return convert_error_code_to_mysql(error, 0, nullptr);
+}
+
+/** Writes DELETE_SCHEMA_DIRECTORY_LOG. This function is used in both CREATE
+ SCHEMA and DROP SCHEMA call flows.
+ @retval  false success
+ @retval  true  failure */
+static bool write_delete_schema_directory_log(
+    handlerton *hton,          /*!< in: handle to the InnoDB
+                               handlerton */
+    const char *schema_name,   /*!< in: name of the schema
+                               being dropped or created */
+    const bool is_drop_schema) /*!< in: is this operation
+                                DROP SCHEMA? */
+{
+  ut_ad(!srv_read_only_mode);
+
+  THD *thd = current_thd;
+  trx_t *trx = check_trx_exists(thd);
+  innobase_register_trx(hton, thd, trx);
+  trx_start_if_not_started(trx, true, UT_LOCATION_HERE);
+
+  /* FN_REFLEN represents the maximum length a full path-name can have.
+  In this case, it is the maximum posssible length of a directory path. */
+  char path[FN_REFLEN + 1];
+  bool was_truncated = false;
+  build_table_filename(path, sizeof(path) - 1, schema_name, "", nullptr, 0,
+                       &was_truncated);
+  if (was_truncated) {
+    my_error(ER_IDENT_CAUSES_TOO_LONG_PATH, MYF(0), sizeof(path) - 1, path);
+    return true;
+  }
+
+  const dberr_t err =
+      log_ddl->write_delete_schema_directory_log(trx, path, is_drop_schema);
+
+  if (err != DB_SUCCESS) {
+    my_error(convert_error_code_to_mysql(err, 0, current_thd), MYF(0));
+    return true;
+  }
+
+  return false;
+}
+
+static bool innobase_write_ddl_drop_schema(handlerton *hton,
+                                           const char *schema_name) {
+  return write_delete_schema_directory_log(hton, schema_name, true);
+}
+
+static bool innobase_write_ddl_create_schema(handlerton *hton,
+                                             const char *schema_name) {
+  return write_delete_schema_directory_log(hton, schema_name, false);
 }
 
 /** Frees a possible InnoDB trx object associated with the current THD.
@@ -14215,7 +14305,7 @@ int create_table_info_t::create_table_update_dict() {
 
   innobase_copy_frm_flags_from_create_info(m_table, m_create_info);
 
-  dict_stats_update(m_table, DICT_STATS_EMPTY_TABLE);
+  dict_stats_update_retry(m_table, DICT_STATS_EMPTY_TABLE, 30);
 
   /* Since no dict_table_close(), deinitialize it explicitly. */
   dict_stats_deinit(m_table);
@@ -20130,7 +20220,10 @@ int ha_innobase::cmp_ref(
     }
 
     if (result) {
-      return (result);
+      if (key_part->key_part_flag & HA_REVERSE_SORT) {
+        result = -result;
+      }
+      return result;
     }
 
     ref1 += key_part->store_length;
@@ -20593,7 +20686,7 @@ static int check_func_bool(THD *, SYS_VAR *, void *save,
 
     if (str == nullptr) return 1;
 
-    result = find_type(&bool_typelib, str, length, true) - 1;
+    result = find_type(&bool_typelib, str, length, false) - 1;
 
     if (result < 0) return 1;
   } else {
@@ -22821,11 +22914,15 @@ static MYSQL_SYSVAR_ULONG(log_write_ahead_size, srv_log_write_ahead_size,
                           INNODB_LOG_WRITE_AHEAD_SIZE_MAX,
                           OS_FILE_LOG_BLOCK_SIZE);
 
+/* The `thd_get_num_vcpus() >= 32` was derived from performance testing results
+  and relate to the `Bug #113485 Let innodb_dedicated_server set
+  innodb_log_writer_threads based on server size` feature request. */
 static MYSQL_SYSVAR_BOOL(
     log_writer_threads, srv_log_writer_threads, PLUGIN_VAR_RQCMDARG,
     "Whether the log writer threads should be activated (ON), or write/flush "
     "of the redo log should be done by each thread individually (OFF).",
-    nullptr, innodb_log_writer_threads_update, true);
+    nullptr, innodb_log_writer_threads_update,
+    std::thread::hardware_concurrency() >= 32);
 
 static MYSQL_SYSVAR_UINT(
     log_spin_cpu_abs_lwm, srv_log_spin_cpu_abs_lwm, PLUGIN_VAR_RQCMDARG,
@@ -23677,11 +23774,10 @@ int ha_innobase::multi_range_read_next(char **range_info) {
   return (m_ds_mrr.dsmrr_next(range_info));
 }
 
-ha_rows ha_innobase::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
-                                                 void *seq_init_param,
-                                                 uint n_ranges, uint *bufsz,
-                                                 uint *flags,
-                                                 Cost_estimate *cost) {
+ha_rows ha_innobase::multi_range_read_info_const(
+    uint keyno, RANGE_SEQ_IF *seq, void *seq_init_param, uint n_ranges,
+    uint *bufsz, uint *flags, bool *force_default_mrr [[maybe_unused]],
+    Cost_estimate *cost) {
   /* See comments in ha_myisam::multi_range_read_info_const */
   m_ds_mrr.init(table);
 

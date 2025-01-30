@@ -5896,6 +5896,7 @@ SELECT REVERSE(TIME_FORMAT('', NULL)) AS field1
 FROM t1
 GROUP BY ROLLUP(REVERSE(TIME_FORMAT('', NULL)));
 field1
+NULL
 DROP TABLE t1;
 # Bug#36367776: Assertion failure in Item_func_numhybrid::val_str
 CREATE TABLE t(col INTEGER);
@@ -5981,4 +5982,17 @@ Table	Create Table
 t1	CREATE TABLE `t1` (
   `col` varchar(36) DEFAULT (replace(uuid(),_utf8mb3'-',_utf8mb3'_'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE t1;
+#
+# Bug#36812010 crash in Item_func_soundex::val_str
+#
+DO '' SOUNDS LIKE LEAD(DATABASE(), 1, x'cafe') OVER();
+ERROR HY000: Cannot convert string '\xCA\xFE' from binary to utf8mb3
+#
+# Bug#37086818 mysqld assertion failure `(slen % 4) == 0'
+#              in my_strnncollsp_utf32 at ../strings/ctype-ucs2.cc
+#
+CREATE TABLE t1 (f1 VARCHAR(10) COLLATE UTF32_GENERAL_CI);
+SELECT * FROM t1 WHERE LOCATE('Q',f1,1) BETWEEN 'a' AND 'b';
+f1
 DROP TABLE t1;

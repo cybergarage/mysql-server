@@ -26,4 +26,16 @@ DISABLE_MISSING_PROFILE_WARNING()
 ADD_LIBRARY(library_mysys STATIC
   my_memory.cc
   my_hex_tools.cc
+  my_base64_encode.cc
+  option_usage_data.cc
 )
+
+IF(UNIX)
+  TARGET_COMPILE_OPTIONS(library_mysys PRIVATE "-fvisibility=hidden")
+ENDIF()
+
+# Use default value for -ftls-model which is global-dynamic with -fPIC
+REMOVE_CMAKE_COMPILER_FLAGS(CMAKE_C_FLAGS "-ftls-model=initial-exec")
+REMOVE_CMAKE_COMPILER_FLAGS(CMAKE_CXX_FLAGS "-ftls-model=initial-exec")
+
+TARGET_LINK_LIBRARIES(library_mysys rapidjson)

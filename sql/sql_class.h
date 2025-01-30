@@ -1070,7 +1070,21 @@ class THD : public MDL_context_owner,
   std::unique_ptr<Secondary_engine_statement_context>
       m_secondary_engine_statement_context;
 
+  /* eligible secondary engine handlerton for this query */
+  handlerton *m_eligible_secondary_engine_handlerton;
+
  public:
+  /* Store a thread safe copy of protocol properties. */
+  enum class cached_properties : int {
+    NONE = 0,         // No properties
+    IS_ALIVE = 1,     // protocol->is_connection_alive()
+    RW_STATUS = 2,    // protocol->get_rw_status()
+    LAST = 4,         // Next unused power of 2.
+    ALL = (LAST - 1)  // Mask selecting all properties.
+  };
+  void store_cached_properties(
+      cached_properties prop_mask = cached_properties::ALL);
+
   /* Used to execute base64 coded binlog events in MySQL server */
   Relay_log_info *rli_fake;
   /* Slave applier execution context */
@@ -1105,6 +1119,12 @@ class THD : public MDL_context_owner,
 
   Secondary_engine_statement_context *secondary_engine_statement_context() {
     return m_secondary_engine_statement_context.get();
+  }
+
+  void set_eligible_secondary_engine_handlerton(handlerton *hton);
+
+  handlerton *eligible_secondary_engine_handlerton() const {
+    return m_eligible_secondary_engine_handlerton;
   }
 
   /**
@@ -1290,12 +1310,13 @@ class THD : public MDL_context_owner,
   mysql_mutex_t LOCK_query_plan;
 
   /**
-    Keep a cached value saying whether the connection is alive. Update when
+    Keep cached values of "connection alive" and "rw status". Update when
     pushing, popping or getting the protocol. Used by
     information_schema.processlist to avoid locking mutexes that might
     affect performance.
   */
   std::atomic<bool> m_cached_is_connection_alive;
+  std::atomic<uint> m_cached_rw_status;
 
  public:
   /// Locks the query plan of this THD
@@ -1425,8 +1446,7 @@ class THD : public MDL_context_owner,
     /// Asserts that current_thd has locked this plan, if it does not own it.
     void assert_plan_is_locked_if_other() const
 #ifdef NDEBUG
-    {
-    }
+        {}
 #else
         ;
 #endif
@@ -1436,7 +1456,8 @@ class THD : public MDL_context_owner,
           sql_command(SQLCOM_END),
           lex(nullptr),
           modification_plan(nullptr),
-          is_ps(false) {}
+          is_ps(false) {
+    }
 
     /**
       Set query plan.
@@ -1720,6 +1741,24 @@ class THD : public MDL_context_owner,
   uchar *binlog_row_event_extra_data;
 
   int binlog_setup_trx_data();
+
+  /**
+   * @brief Configure size of binlog transaction cache. Used to configure the
+   * size of an individual cache, normally to a value that differs from the
+   * default `binlog_cache_size` which controls the size otherwise.
+   *
+   * @note Assumes that the binlog cache manager already exist (i.e created
+   * by call to binlog_setup_trx_data()) and is empty.
+   *
+   * @param new_size The new size of cache. Value exceeding
+   * `max_binlog_cache_size` will be clamped and warning logged. Value must be
+   * a multiple of IO_SIZE which is the block size for all binlog cache size
+   * related variables.
+   *
+   * @return true if new cache size can't be configured, in that case the cache
+   * is not usable.
+   */
+  bool binlog_configure_trx_cache_size(ulong new_size);
 
   /*
     Public interface to write RBR events to the binlog
@@ -2454,6 +2493,7 @@ class THD : public MDL_context_owner,
 
   void inc_status_created_tmp_disk_tables();
   void inc_status_created_tmp_tables();
+  void inc_status_count_hit_tmp_table_size();
   void inc_status_select_full_join();
   void inc_status_select_full_range_join();
   void inc_status_select_range();
@@ -3262,6 +3302,9 @@ class THD : public MDL_context_owner,
 
   /** Return false if connection to client is broken. */
   bool is_connected(bool use_cached_connection_alive = false) final;
+
+  /** Return the cached protocol rw status. */
+  uint get_protocol_rw_status();
 
   /**
     Mark the current error as fatal. Warning: this does not
@@ -4665,6 +4708,8 @@ class THD : public MDL_context_owner,
   void set_secondary_engine_optimization(Secondary_engine_optimization state) {
     m_secondary_engine_optimization = state;
   }
+  /// cleanup all secondary engine relevant members after statement execution.
+  void cleanup_after_statement_execution();
 
   /**
     Can secondary storage engines be used for query execution in
@@ -4818,7 +4863,6 @@ class THD : public MDL_context_owner,
 
   Event_reference_caching_cache *events_cache_{nullptr};
   Event_tracking_data_stack event_tracking_data_;
-  bool audit_plugins_present;
 
  public:
   /// Flag indicating whether this session incremented the number of sessions

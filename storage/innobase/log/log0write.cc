@@ -73,7 +73,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 /* redo_log_archive_produce */
 #include "log0meb.h"
 
-/* recv_no_ibuf_operations */
+/* recv_recovery_is_on */
 #include "log0recv.h"
 
 /* log_t::X */
@@ -981,7 +981,7 @@ static Wait_stats log_self_write_up_to(log_t &log, lsn_t end_lsn,
   lsn_t write_lsn = log.write_lsn.load(std::memory_order_relaxed);
   for (uint64_t step = 0; write_lsn < ready_lsn; ++step) {
     if (step % 1024 == 0) {
-      /* The first loop or just after std::this_thread::sleep_for(0) */
+      /* The first loop or just after std::this_thread::yield() */
       const lsn_t limit_lsn =
           flush_to_disk
               ? log.flushed_to_disk_lsn.load(std::memory_order_acquire)
@@ -997,7 +997,7 @@ static Wait_stats log_self_write_up_to(log_t &log, lsn_t end_lsn,
     if ((step + 1) % 1024 == 0) {
       /* approximate per srv_log_write_ahead_size * 1024 written. */
       log_writer_mutex_exit(log);
-      std::this_thread::sleep_for(std::chrono::seconds(0));
+      std::this_thread::yield();
       log_writer_mutex_enter(log);
     }
 
@@ -1072,10 +1072,9 @@ Wait_stats log_write_up_to(log_t &log, lsn_t end_lsn, bool flush_to_disk) {
   Note that redo log is actually flushed, because changes to the page
   are caused by applying the redo. */
 
-  if (recv_no_ibuf_operations) {
+  if (recv_recovery_is_on()) {
     /* Recovery is running and no operations on the log files are
-    allowed yet, which is implicitly deduced from the fact, that
-    still ibuf merges are disallowed. */
+    allowed yet. */
     return Wait_stats{0};
   }
 
@@ -2302,7 +2301,7 @@ void log_writer(log_t *log_ptr) {
 
         log_writer_mutex_exit(log);
 
-        std::this_thread::sleep_for(std::chrono::seconds(0));
+        std::this_thread::yield();
 
         log_writer_mutex_enter(log);
       }
@@ -2541,7 +2540,7 @@ void log_flusher(log_t *log_ptr) {
         if (step % 1024 == 0) {
           log_flusher_mutex_exit(log);
 
-          std::this_thread::sleep_for(std::chrono::seconds(0));
+          std::this_thread::yield();
 
           log_flusher_mutex_enter(log);
         }
@@ -2731,7 +2730,7 @@ void log_write_notifier(log_t *log_ptr) {
     if (step % 1024 == 0) {
       log_write_notifier_mutex_exit(log);
 
-      std::this_thread::sleep_for(std::chrono::seconds(0));
+      std::this_thread::yield();
 
       log_write_notifier_mutex_enter(log);
     }
@@ -2853,7 +2852,7 @@ void log_flush_notifier(log_t *log_ptr) {
     if (step % 1024 == 0) {
       log_flush_notifier_mutex_exit(log);
 
-      std::this_thread::sleep_for(std::chrono::seconds(0));
+      std::this_thread::yield();
 
       log_flush_notifier_mutex_enter(log);
     }

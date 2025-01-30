@@ -489,14 +489,15 @@ class Bulk_extent_allocator {
   ~Bulk_extent_allocator() { stop(); }
 
   /** Check size and set extent allocator size parameters
-  @param[in] table Innodb dictionary table object
+  @param[in] table InnoDB dictionary table object
+  @param[in] index InnoDB index being built.
   @param[in] trx transaction performing bulk load
   @param[in] size total data size to be loaded
   @param[in] num_threads number of concurrent threads
   @param[in] in_pages if true, allocate in pages
   @return tablespace extend size in bytes. */
-  uint64_t init(dict_table_t *table, trx_t *trx, size_t size,
-                size_t num_threads, bool in_pages);
+  uint64_t init(dict_table_t *table, dict_index_t *index, trx_t *trx,
+                size_t size, size_t num_threads, bool in_pages);
 
   /* Start extent allocator thread. */
   void start();
@@ -643,6 +644,7 @@ class Bulk_extent_allocator {
 
   /** Innodb dictionary table object. */
   dict_table_t *m_table{};
+  dict_index_t *m_index{};
 
   /** Innodb transaction - used for checking interrupt. */
   trx_t *m_trx{};
@@ -789,7 +791,7 @@ class Blob_inserter {
  public:
   /** Constructor.
   @param[in]  btree_load  the B-tree into which blobs are inserted. */
-  Blob_inserter(Btree_load &btree_load) : m_btree_load(btree_load) {}
+  Blob_inserter(Btree_load &btree_load);
 
   ~Blob_inserter();
 
@@ -881,8 +883,8 @@ class Blob_inserter {
   /** Cache of Page_extent objects. */
   ut::Object_cache<Page_extent> m_page_extent_cache;
 
-  /** Cache the free context objects. */
-  std::vector<Blob_handle *> m_free_blob_ctxs;
+  /** Only one blob handle per sub-tree */
+  ut::unique_ptr<Blob_handle> m_blob_handle;
 };
 
 } /* namespace bulk */
@@ -985,6 +987,8 @@ class Btree_load : private ut::Non_copyable {
   /** Trigger flusher thread and check for error.
   @return Innodb error code. */
   dberr_t trigger_flusher() const { return m_bulk_flusher.check_and_notify(); }
+
+  bool is_pk() const { return m_index->is_clustered(); }
 
   /** Get the index object.
   @return index object. */
@@ -1274,7 +1278,7 @@ class Btree_load::Merger {
  public:
   using Btree_loads = std::vector<Btree_load *, ut::allocator<Btree_load *>>;
 
-  Merger(Btree_loads &loads, dict_index_t *index, trx_t *trx)
+  Merger(Btree_loads &loads, dict_index_t *index, const trx_t *trx)
       : m_btree_loads(loads),
         m_index(index),
         m_trx(trx),
@@ -1333,7 +1337,7 @@ class Btree_load::Merger {
   dict_index_t *m_index{};
 
   /** Transaction making the changes. */
-  trx_t *m_trx{};
+  const trx_t *m_trx{};
 
   /** Memory heap to store node pointers. */
   Scoped_heap m_tuple_heap{};

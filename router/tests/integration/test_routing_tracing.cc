@@ -42,9 +42,9 @@
 #include <gtest/gtest-param-test.h>
 #include <gtest/gtest.h>
 
-#define RAPIDJSON_HAS_STDSTRING 1
-
+#ifdef RAPIDJSON_NO_SIZETYPEDEFINE
 #include "my_rapidjson_size_t.h"
+#endif
 
 #include <rapidjson/error/en.h>
 #include <rapidjson/pointer.h>
@@ -299,9 +299,8 @@ class SharedRouter {
     std::vector<std::string> dests;
     dests.reserve(servers.size());
 
-    for (const auto &s : servers) {
-      dests.push_back(s->server_host() + ":" +
-                      std::to_string(s->server_port()));
+    for (const auto &srv : servers) {
+      dests.push_back(srv->classic_tcp_destination().str());
     }
 
     return dests;
@@ -543,7 +542,13 @@ class TestEnv : public ::testing::Environment {
         if (s->mysqld_failed_to_start()) {
           GTEST_SKIP() << "mysql-server failed to start.";
         }
-        s->setup_mysqld_accounts();
+
+        auto cli_res = s->admin_cli();
+        ASSERT_NO_ERROR(cli_res);
+
+        auto cli = std::move(*cli_res);
+
+        SharedServer::setup_mysqld_accounts(cli);
       }
     }
   }
